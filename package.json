@@ -1,0 +1,16 @@
+{
+  "name": "mirasim-2api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Linux OpenAI-compatible proxy for logged-in Mirasim relay profiles.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "login": "node src/index.js login",
+    "relay": "node src/index.js relay",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

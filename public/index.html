@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Mirasim Relay Console</title>
+    <link rel="stylesheet" href="/assets/dashboard.css">
+  </head>
+  <body>
+    <div class="app-layout">
+      <aside class="sider" aria-label="控制台导航">
+        <div class="brand" aria-label="Mirasim Relay Console">
+          <span class="brand-mark" aria-hidden="true">M</span>
+          <span class="brand-copy"><strong>Mirasim Relay</strong><small>Control Console</small></span>
+        </div>
+
+        <nav class="nav-menu" aria-label="工作区">
+          <button id="nav-overview" class="nav-item active" type="button"><span class="nav-icon nav-icon-grid" aria-hidden="true"></span>概览</button>
+          <button id="nav-activity" class="nav-item" type="button"><span class="nav-icon nav-icon-activity" aria-hidden="true"></span>邀请活动</button>
+          <button id="nav-api-keys" class="nav-item" type="button"><span class="nav-icon nav-icon-key" aria-hidden="true"></span>API 密钥</button>
+          <button id="nav-account-pool" class="nav-item" type="button"><span class="nav-icon nav-icon-users" aria-hidden="true"></span>账号池</button>
+          <button id="nav-model-health" class="nav-item" type="button"><span class="nav-icon nav-icon-heartbeat" aria-hidden="true"></span>模型健康</button>
+        </nav>
+
+        <div class="sider-footer">
+          <div class="relay-status">
+            <span class="relay-status-dot" aria-hidden="true"></span>
+            <span>Relay</span>
+            <code id="relay-host">正在连接</code>
+          </div>
+          <button id="mirasim-login-open" class="button button-primary side-action" type="button">登录账号</button>
+          <button id="logout" class="button button-text side-action" type="button">退出控制台</button>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="workspace-header">
+          <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">M</span><span>Mirasim Relay</span></div>
+          <div class="header-actions">
+            <button id="refresh" class="button button-secondary" type="button">刷新数据</button>
+            <button id="mirasim-login-open-header" class="button button-primary" type="button">登录账号</button>
+          </div>
+        </header>
+
+        <main class="shell">
+          <div id="notice" class="notice" role="status" hidden></div>
+
+          <section id="overview-view" class="view-panel">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">CONTROL CONSOLE</p>
+                <h1>概览</h1>
+                <p class="page-description">账号池和本机中转用量的聚合统计。</p>
+              </div>
+              <p id="updated-at" class="updated-at">正在读取账号状态</p>
+            </div>
+
+            <div class="overview-grid" aria-label="中转概览">
+              <article class="overview-stat tone-blue"><span>账号总数</span><strong id="overview-account-count">0</strong><small>已配置账号槽位</small></article>
+              <article class="overview-stat tone-green"><span>已登录账号</span><strong id="overview-signed-in-count">0</strong><small>可供中转使用</small></article>
+              <article class="overview-stat tone-orange"><span>可用账号</span><strong id="overview-available-count">0</strong><small>当前未处于冷却</small></article>
+              <article class="overview-stat tone-blue"><span>累计请求</span><strong id="overview-request-count">0</strong><small>本进程已记录</small></article>
+              <article class="overview-stat tone-green"><span>输入 Token</span><strong id="overview-input-tokens">0</strong><small>官方记录汇总</small></article>
+              <article class="overview-stat tone-orange"><span>输出 Token</span><strong id="overview-output-tokens">0</strong><small>官方记录汇总</small></article>
+              <article class="overview-stat tone-purple"><span>缓存读取</span><strong id="overview-cache-read-tokens">0</strong><small>Cache read tokens</small></article>
+              <article class="overview-stat tone-cyan"><span>缓存写入</span><strong id="overview-cache-write-tokens">0</strong><small>Cache write tokens</small></article>
+            </div>
+
+          </section>
+
+          <section id="activity-view" class="view-panel" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">MEMBERSHIP & REFERRAL</p>
+                <h1>邀请活动</h1>
+                <p class="page-description">查看当前账号的会员进度，生成或兑换邀请码。</p>
+              </div>
+            </div>
+
+            <div id="console" hidden>
+              <section class="account-bar" aria-label="账号选择">
+                <div class="account-bar-label"><span>当前账号</span><strong id="account-status" class="status-dot">读取中</strong></div>
+                <select id="account-select" aria-label="当前账号"></select>
+              </section>
+
+              <div class="dashboard-grid activity-grid">
+                <section class="panel activity-panel">
+                  <div class="panel-heading">
+                    <div><p class="eyebrow">LATEST ACTIVITY</p><h2>会员邀请活动</h2></div>
+                    <span id="activity-state" class="badge">读取中</span>
+                  </div>
+                  <div id="membership-summary" class="membership-summary"></div>
+                  <div class="progress-block">
+                    <div class="progress-labels"><span>已兑换 <strong id="redeemed-count">-</strong></span><span id="remaining-count">-</span></div>
+                    <div class="progress-track" aria-label="邀请进度"><div id="progress-value" class="progress-value"></div></div>
+                    <p id="progress-copy" class="panel-note"></p>
+                  </div>
+                </section>
+
+                <section class="panel invite-panel">
+                  <div class="panel-heading compact">
+                    <div><p class="eyebrow">REFERRAL CODE</p><h2>我的邀请码</h2></div>
+                    <button id="create-code" class="button button-secondary" type="button">生成</button>
+                  </div>
+                  <div class="code-row"><output id="invite-code" class="invite-code">未生成</output><button id="copy-code" class="button button-secondary" type="button" disabled>复制</button></div>
+                  <p id="invite-copy" class="panel-note"></p>
+                </section>
+
+                <section class="panel redeem-panel">
+                  <div class="panel-heading compact"><div><p class="eyebrow">REDEEM</p><h2>兑换邀请码</h2></div></div>
+                  <form id="redeem-form" class="redeem-form">
+                    <label class="sr-only" for="redeem-code">邀请码</label>
+                    <input id="redeem-code" name="code" autocomplete="off" maxlength="128" placeholder="输入邀请码" required>
+                    <button class="button button-primary" type="submit">兑换</button>
+                  </form>
+                  <p id="redeem-status" class="panel-note">兑换成功后将刷新此账号的官方登录态。</p>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <section id="api-keys-view" class="view-panel" hidden>
+            <div class="page-heading">
+              <div><p class="eyebrow">OPENAI AUTHENTICATION</p><h1>API 密钥</h1><p class="page-description">创建、复制或吊销访问 OpenAI 兼容接口的密钥。</p></div>
+            </div>
+            <section class="panel api-key-panel" aria-labelledby="api-key-title">
+              <div class="panel-heading compact"><div><p class="eyebrow">API KEY MANAGEMENT</p><h2 id="api-key-title">OpenAI API Key</h2></div></div>
+              <form id="api-key-form" class="api-key-form"><label class="sr-only" for="api-key-name">密钥名称</label><input id="api-key-name" name="name" maxlength="64" placeholder="密钥名称，例如本机开发"><button class="button button-primary" type="submit">生成密钥</button></form>
+              <div id="api-key-reveal" class="api-key-reveal" hidden><code id="api-key-value" class="api-key-value"></code><button id="copy-api-key" class="button button-secondary" type="button">复制</button></div>
+              <p class="panel-note">新密钥仅在生成时显示一次。所有 OpenAI 兼容请求均须使用它。</p>
+              <div class="table-wrap api-key-table-wrap"><table class="api-key-table"><thead><tr><th>名称</th><th>密钥前缀</th><th>创建时间</th><th>最近使用</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="api-key-list"></tbody></table></div>
+            </section>
+          </section>
+
+          <section id="account-pool-view" class="view-panel" hidden>
+            <div class="page-heading">
+              <div><p class="eyebrow">ROUND ROBIN POOL</p><h1>账号池</h1><p class="page-description">查看每个账号的账户类型、邀请名额和中转健康度。</p></div>
+              <div class="health-actions"><span class="section-hint">按可用账号轮询</span><button id="restore-accounts" class="button button-secondary" type="button">恢复本地账户</button></div>
+            </div>
+            <section class="pool-section">
+              <div class="table-wrap"><table><thead><tr><th>账号</th><th>账户类型</th><th>邀请活动</th><th>中转状态</th><th>最近响应</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="pool-body"></tbody></table></div>
+            </section>
+          </section>
+
+          <section id="model-health-view" class="view-panel" hidden>
+            <div class="page-heading">
+              <div><p class="eyebrow">UPSTREAM MODEL PROBES</p><h1>模型健康</h1><p class="page-description">先读取上游模型目录；健康检测按队列逐个执行，不会改变正常中转请求的冷却状态。</p></div>
+              <div class="health-actions"><span id="model-health-updated" class="updated-at">正在读取模型目录</span><button id="model-health-discover" class="button button-secondary" type="button">刷新模型</button><button id="model-health-run" class="button button-primary" type="button">开始检测</button></div>
+            </div>
+            <div id="model-health-summary" class="health-summary" aria-live="polite"></div>
+            <section class="pool-section">
+              <div class="table-wrap"><table class="model-health-table"><thead><tr><th>模型</th><th>状态</th><th>响应耗时</th><th>HTTP</th><th>检测时间</th><th>结果</th></tr></thead><tbody id="model-health-body"></tbody></table></div>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="mirasim-login-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="mirasim-login-title" hidden>
+      <div class="modal-mask" data-close-mirasim-login></div>
+      <section class="modal-content">
+        <div class="modal-heading"><div><p class="eyebrow">MIRASIM AUTH</p><h2 id="mirasim-login-title">登录 Mirasim 账号</h2></div><button id="mirasim-login-close" class="icon-button" type="button" aria-label="关闭登录窗口">×</button></div>
+        <p id="mirasim-login-status" class="modal-status">输入邮箱后发送验证码。</p>
+        <form id="mirasim-code-form" class="mirasim-login-form">
+          <label for="mirasim-account-select">账号槽位</label><select id="mirasim-account-select"></select>
+          <label for="mirasim-email">邮箱</label><input id="mirasim-email" name="email" type="email" autocomplete="email" placeholder="name@example.com" required>
+          <button class="button button-secondary" type="submit">发送验证码</button>
+        </form>
+        <form id="mirasim-verify-form" class="mirasim-verify-form"><label for="mirasim-verify-code">验证码</label><div class="verify-row"><input id="mirasim-verify-code" name="code" autocomplete="one-time-code" maxlength="128" placeholder="输入邮箱验证码" required><button class="button button-primary" type="submit">登录账号</button></div></form>
+        <form id="moemail-register-form" class="moemail-register-form">
+          <label for="moemail-invite-code">兑换码</label>
+          <input id="moemail-invite-code" name="inviteCode" autocomplete="off" maxlength="128" placeholder="可选">
+          <label for="moemail-count">数量</label>
+          <input id="moemail-count" name="count" type="number" min="1" max="5" step="1" value="1" required>
+          <button class="button button-primary" type="submit">MoeMail 注册</button>
+        </form>
+        <form id="moemail-config-form" class="moemail-config-form">
+          <label for="moemail-url">服务地址</label>
+          <input id="moemail-url" name="url" type="url" autocomplete="url" placeholder="https://mail.example.com" required>
+          <label for="moemail-domain">邮箱域名</label>
+          <input id="moemail-domain" name="domain" autocomplete="off" placeholder="mail.example.com" required>
+          <label for="moemail-api-key">API Key</label>
+          <input id="moemail-api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="首次配置必填">
+          <button class="button button-secondary" type="submit">保存 MoeMail 配置</button>
+          <span id="moemail-config-status" class="config-status"></span>
+        </form>
+      </section>
+    </div>
+
+    <script type="module" src="/assets/dashboard.js"></script>
+  </body>
+</html>

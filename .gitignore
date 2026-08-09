@@ -1,0 +1,6 @@
+.env
+.mirasim/
+.runtime/
+profiles/
+.DS_Store
+coverage/
