@@ -9,6 +9,7 @@ const REFRESH_TIMEOUT_MS = 12_000;
 export class MirasimSessionRefresher {
   #nextCheckAt = new Map();
   #inFlight = new Map();
+  #failures = new Map();
 
   constructor(config, { fetchImpl = fetch, now = () => Date.now() } = {}) {
     this.config = config;
@@ -30,6 +31,10 @@ export class MirasimSessionRefresher {
     return this.#start(home, this.now(), true);
   }
 
+  failureReason(home) {
+    return this.#failures.get(home) || null;
+  }
+
   #start(home, now, force) {
     const active = this.#inFlight.get(home);
     if (active) return active;
@@ -40,7 +45,7 @@ export class MirasimSessionRefresher {
 
   async #refresh(home, now, force) {
     const auth = storedAuth(home);
-    if (!auth?.token || !auth.refreshToken) return this.#wait(home, now, FAILED_CHECK_INTERVAL_MS);
+    if (!auth?.token || !auth.refreshToken) return this.#fail(home, now, "本地缺少可用的刷新令牌。");
     const secondsLeft = typeof auth.exp === "number" ? auth.exp - Math.floor(now / 1000) : 0;
     if (!force && secondsLeft > REFRESH_WINDOW_SECONDS) {
       this.#nextCheckAt.set(home, Math.min(now + CHECK_INTERVAL_MS, (auth.exp - REFRESH_WINDOW_SECONDS) * 1000));
@@ -59,12 +64,16 @@ export class MirasimSessionRefresher {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok || typeof data?.access_token !== "string" || !data.access_token) {
-        return this.#wait(home, now, FAILED_CHECK_INTERVAL_MS);
+        const reason = !response.ok
+          ? `官方续期被拒绝（HTTP ${response.status}）：${upstreamReason(data) || "未返回详情。"}`
+          : "官方续期响应未包含新的访问令牌。";
+        return this.#fail(home, now, reason);
       }
       saveRefreshedAuth(home, data.access_token, typeof data.refresh_token === "string" && data.refresh_token ? data.refresh_token : auth.refreshToken);
+      this.#failures.delete(home);
       return this.#wait(home, now, CHECK_INTERVAL_MS, true);
-    } catch {
-      return this.#wait(home, now, FAILED_CHECK_INTERVAL_MS);
+    } catch (error) {
+      return this.#fail(home, now, error?.name === "AbortError" ? "官方续期请求超时。" : "无法连接官方续期接口。");
     } finally {
       clearTimeout(timer);
     }
@@ -73,6 +82,11 @@ export class MirasimSessionRefresher {
   #wait(home, now, interval, result = false) {
     this.#nextCheckAt.set(home, now + interval);
     return result;
+  }
+
+  #fail(home, now, reason) {
+    this.#failures.set(home, reason);
+    return this.#wait(home, now, FAILED_CHECK_INTERVAL_MS);
   }
 }
 
@@ -122,4 +136,10 @@ function jwtUserId(token) {
   } catch {
     return undefined;
   }
+}
+
+function upstreamReason(data) {
+  const candidates = [data?.detail, data?.message, data?.error?.message, typeof data?.error === "string" ? data.error : null];
+  const value = candidates.find((candidate) => typeof candidate === "string" && candidate.trim());
+  return value?.trim().slice(0, 240) || null;
 }

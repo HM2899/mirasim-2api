@@ -139,18 +139,38 @@
               <div class="health-actions"><span class="section-hint">按可用账号轮询</span><button id="restore-accounts" class="button button-secondary" type="button">恢复本地账户</button></div>
             </div>
             <section class="pool-section">
+              <div class="pool-toolbar">
+                <div class="pool-filters">
+                  <label class="sr-only" for="pool-search">搜索账户</label>
+                  <input id="pool-search" type="search" autocomplete="off" placeholder="搜索账户、邮箱或 ID">
+                  <label class="sr-only" for="pool-category">账户分类</label>
+                  <select id="pool-category" aria-label="账户分类">
+                    <option value="all">全部分类</option>
+                    <option value="max">Max</option>
+                    <option value="plus">Plus</option>
+                    <option value="standard">普通用户</option>
+                    <option value="member">其他会员</option>
+                    <option value="logged-out">未登录</option>
+                  </select>
+                </div>
+                <div class="pool-pagination" aria-label="账户分页">
+                  <span id="pool-page-summary" class="section-hint"></span>
+                  <button id="pool-page-prev" class="button button-secondary" type="button" aria-label="上一页">上一页</button>
+                  <button id="pool-page-next" class="button button-secondary" type="button" aria-label="下一页">下一页</button>
+                </div>
+              </div>
               <div class="table-wrap"><table><thead><tr><th>账号</th><th>账户类型</th><th>邀请活动</th><th>中转状态</th><th>最近响应</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="pool-body"></tbody></table></div>
             </section>
           </section>
 
           <section id="model-health-view" class="view-panel" hidden>
             <div class="page-heading">
-              <div><p class="eyebrow">UPSTREAM MODEL PROBES</p><h1>模型健康</h1><p class="page-description">先读取上游模型目录；健康检测按队列逐个执行，不会改变正常中转请求的冷却状态。</p></div>
-              <div class="health-actions"><span id="model-health-updated" class="updated-at">正在读取模型目录</span><button id="model-health-discover" class="button button-secondary" type="button">刷新模型</button><button id="model-health-run" class="button button-primary" type="button">开始检测</button></div>
+              <div><p class="eyebrow">UPSTREAM MODEL PROBES</p><h1>模型健康</h1><p class="page-description">单个模型可即时检测；定时任务每次只轮转检测一个模型。</p></div>
+              <div class="health-actions"><span id="model-health-updated" class="updated-at">正在读取模型目录</span><button id="model-health-discover" class="button button-secondary" type="button">刷新模型</button></div>
             </div>
             <div id="model-health-summary" class="health-summary" aria-live="polite"></div>
             <section class="pool-section">
-              <div class="table-wrap"><table class="model-health-table"><thead><tr><th>模型</th><th>状态</th><th>响应耗时</th><th>HTTP</th><th>检测时间</th><th>结果</th></tr></thead><tbody id="model-health-body"></tbody></table></div>
+              <div class="table-wrap"><table class="model-health-table"><thead><tr><th>模型</th><th>状态</th><th>响应耗时</th><th>HTTP</th><th>检测时间</th><th>结果</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="model-health-body"></tbody></table></div>
             </section>
           </section>
         </main>

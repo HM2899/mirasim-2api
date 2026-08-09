@@ -152,7 +152,7 @@ test("timeout defaults keep streams responsive while bounding model discovery", 
   assert.equal(config.timeoutMs, 300_000);
   assert.equal(config.firstByteTimeoutMs, 45_000);
   assert.equal(config.modelListTimeoutMs, 10_000);
-  assert.equal(config.modelHealthIntervalMs, 1_800_000);
+  assert.equal(config.modelHealthIntervalMs, 60_000);
   assert.equal(config.modelHealthTimeoutMs, 12_000);
   assert.equal(config.loginUrl, "https://admin.test.mirofish.ai");
 });

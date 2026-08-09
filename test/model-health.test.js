@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MirasimModelHealth } from "../src/model-health.js";
 
-test("discovers models before the sequential health pass and records each outcome", async () => {
+test("discovers models then checks only the selected model", async () => {
   const calls = [];
   const pool = {
     pick() { return { home: "/profile-a", token: "mirasim-token" }; }
@@ -33,18 +33,52 @@ test("discovers models before the sequential health pass and records each outcom
     { id: "limited-model", status: "pending" }
   ]);
 
-  const snapshot = await health.run();
+  const snapshot = await health.runOne("healthy-model");
   assert.equal(snapshot.running, false);
   assert.deepEqual(snapshot.models.map(({ id, status, httpStatus }) => ({ id, status, httpStatus })), [
-    { id: "configured-model", status: "unavailable", httpStatus: 404 },
+    { id: "configured-model", status: "pending", httpStatus: null },
     { id: "healthy-model", status: "healthy", httpStatus: 200 },
-    { id: "limited-model", status: "limited", httpStatus: 429 }
+    { id: "limited-model", status: "pending", httpStatus: null }
   ]);
   assert.equal(calls[0].url, "https://relay.example.test/v1/models");
-  assert.equal(calls[1].url, "https://relay.example.test/v1/models");
-  assert.equal(calls[2].options.headers.Authorization, "Bearer mirasim-token");
-  assert.equal(JSON.parse(calls[2].options.body).max_tokens, 1);
+  assert.equal(calls[1].options.headers.Authorization, "Bearer mirasim-token");
+  assert.equal(JSON.parse(calls[1].options.body).max_tokens, 1);
   assert.equal(calls.some((call) => call.options?.body?.includes('"model":"*"')), false);
+});
+
+test("scheduled scans rotate one model at a time", async () => {
+  const calls = [];
+  const health = new MirasimModelHealth({ homes: [], relayUrl: "https://relay.example.test", models: ["model-a", "model-b"] }, {
+    pick() { return { token: "mirasim-token" }; }
+  }, {
+    fetchImpl: async (url, options) => {
+      calls.push(options.body ? JSON.parse(options.body).model : "directory");
+      if (url.pathname === "/v1/models") return json({ data: [] });
+      return json({ choices: [] });
+    }
+  });
+  await health.discover();
+  await health.scanNext();
+  await health.scanNext();
+  assert.deepEqual(calls, ["directory", "model-a", "model-b"]);
+});
+
+test("Kimi-K3 health probe omits the unsupported temperature zero parameter", async () => {
+  let payload;
+  const health = new MirasimModelHealth({ homes: [], relayUrl: "https://relay.example.test", models: ["kimi-k3"] }, {
+    pick() { return { home: "/profile-a", token: "mirasim-token" }; }
+  }, {
+    fetchImpl: async (url, options) => {
+      if (url.pathname === "/v1/models") return json({ data: [] });
+      payload = JSON.parse(options.body);
+      return json({ choices: [] });
+    }
+  });
+  await health.discover();
+  await health.runOne("kimi-k3");
+  assert.equal(payload.model, "kimi-k3");
+  assert.equal(payload.temperature, undefined);
+  assert.equal(payload.max_tokens, 1);
 });
 
 test("keeps saved probe results while refreshing the model directory", async () => {

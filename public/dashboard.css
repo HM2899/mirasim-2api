@@ -165,6 +165,12 @@ input:focus, select:focus { border-color: var(--blue); outline: 2px solid rgba(2
 .empty-table { color: var(--muted); text-align: center; }
 
 .pool-section { margin-top: 16px; overflow: hidden; }
+.pool-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid #f0f0f0; background: var(--surface); }
+.pool-filters, .pool-pagination { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.pool-filters input { width: min(280px, 42vw); }
+.pool-filters select { min-width: 128px; }
+.pool-pagination { margin-left: auto; }
+.pool-pagination .section-hint { white-space: nowrap; }
 .health-actions { display: flex; align-items: center; gap: 12px; }
 .health-summary { display: flex; flex-wrap: wrap; gap: 8px; min-height: 32px; align-items: center; }
 .health-count, .health-error { display: inline-flex; min-height: 28px; align-items: center; padding: 3px 9px; border-radius: 4px; font-size: 12px; font-weight: 600; }
@@ -256,6 +262,10 @@ td { font-size: 13px; }
   h1 { font-size: 24px; }
   .account-bar { align-items: stretch; flex-direction: column; gap: 8px; }
   .account-bar select { width: 100%; min-width: 0; }
+  .pool-toolbar { align-items: stretch; flex-direction: column; }
+  .pool-filters { width: 100%; }
+  .pool-filters input, .pool-filters select { width: 100%; min-width: 0; }
+  .pool-pagination { justify-content: flex-end; margin-left: 0; }
   .panel { min-height: 0; }
   .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -272,6 +282,9 @@ td { font-size: 13px; }
   .metrics { grid-template-columns: 1fr; }
   .overview-grid { grid-template-columns: 1fr; }
   .code-row, .api-key-reveal { align-items: stretch; flex-direction: column; }
+  .pool-filters { align-items: stretch; flex-direction: column; }
+  .pool-pagination { display: grid; grid-template-columns: 1fr 1fr; }
+  .pool-pagination .section-hint { grid-column: 1 / -1; white-space: normal; }
   .redeem-form, .api-key-form, .verify-row { grid-template-columns: 1fr; }
   .mirasim-login-form, .moemail-register-form, .moemail-config-form { grid-template-columns: 1fr; }
   .mirasim-login-form label[for="mirasim-email"], .mirasim-login-form #mirasim-email { grid-column: auto; }

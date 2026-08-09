@@ -1,4 +1,5 @@
 const DEFAULT_REDEEM_STATUS = "兑换成功后将刷新此账号的官方登录态。";
+const POOL_PAGE_SIZE = 10;
 const state = {
   data: null,
   apiKeys: [],
@@ -9,6 +10,9 @@ const state = {
   loginAttempt: null,
   moemailConfig: null,
   redeemStatus: { text: DEFAULT_REDEEM_STATUS, type: "idle" },
+  poolQuery: "",
+  poolCategory: "all",
+  poolPage: 1,
   loading: false,
   activeView: "overview"
 };
@@ -78,10 +82,14 @@ const elements = {
   redeemCode: document.querySelector("#redeem-code"),
   redeemStatus: document.querySelector("#redeem-status"),
   poolBody: document.querySelector("#pool-body"),
+  poolSearch: document.querySelector("#pool-search"),
+  poolCategory: document.querySelector("#pool-category"),
+  poolPageSummary: document.querySelector("#pool-page-summary"),
+  poolPagePrev: document.querySelector("#pool-page-prev"),
+  poolPageNext: document.querySelector("#pool-page-next"),
   restoreAccounts: document.querySelector("#restore-accounts"),
   modelHealthUpdated: document.querySelector("#model-health-updated"),
   modelHealthDiscover: document.querySelector("#model-health-discover"),
-  modelHealthRun: document.querySelector("#model-health-run"),
   modelHealthSummary: document.querySelector("#model-health-summary"),
   modelHealthBody: document.querySelector("#model-health-body")
 };
@@ -94,7 +102,6 @@ elements.navApiKeys.addEventListener("click", () => setView("apiKeys"));
 elements.navAccountPool.addEventListener("click", () => setView("accountPool"));
 elements.navModelHealth.addEventListener("click", () => setView("modelHealth"));
 elements.modelHealthDiscover.addEventListener("click", discoverModels);
-elements.modelHealthRun.addEventListener("click", runModelHealthCheck);
 elements.mirasimLoginOpen.addEventListener("click", openMirasimLogin);
 elements.mirasimLoginOpenHeader.addEventListener("click", openMirasimLogin);
 elements.mirasimLoginClose.addEventListener("click", closeMirasimLogin);
@@ -118,12 +125,25 @@ elements.copyApiKey.addEventListener("click", copyApiKey);
 elements.apiKeyList.addEventListener("click", revokeApiKey);
 elements.poolBody.addEventListener("click", deleteAccount);
 elements.poolBody.addEventListener("click", renewAccount);
+elements.poolSearch.addEventListener("input", () => {
+  state.poolQuery = elements.poolSearch.value.trim();
+  state.poolPage = 1;
+  renderPool(state.data?.accounts || []);
+});
+elements.poolCategory.addEventListener("change", () => {
+  state.poolCategory = elements.poolCategory.value;
+  state.poolPage = 1;
+  renderPool(state.data?.accounts || []);
+});
+elements.poolPagePrev.addEventListener("click", () => changePoolPage(-1));
+elements.poolPageNext.addEventListener("click", () => changePoolPage(1));
 elements.restoreAccounts.addEventListener("click", restoreAccounts);
+elements.modelHealthBody.addEventListener("click", checkModel);
 
 loadDashboard();
 setInterval(loadDashboard, 60_000);
 setInterval(() => {
-  if (state.modelHealth?.running || state.modelHealth?.discovering) void loadModelHealth();
+  if (state.activeView === "modelHealth") void loadModelHealth();
 }, 5_000);
 
 async function loadDashboard() {
@@ -219,22 +239,21 @@ function renderModelHealth() {
     result[model.status] = (result[model.status] || 0) + 1;
     return result;
   }, {});
-  const nextRun = health.intervalMs ? `每 ${formatDuration(health.intervalMs)} 自动检测` : "自动检测未启用";
+  const scanCopy = health.scanIntervalMs ? `每 ${formatDuration(health.scanIntervalMs)} 轮转检测一个模型` : "定时检测未启用";
   elements.modelHealthUpdated.textContent = health.discovering
     ? "正在读取模型目录..."
-    : health.running ? `正在检测 ${health.activeModelId || "模型"}...` : health.lastFinishedAt ? `上次检测 ${formatTime(health.lastFinishedAt)}，${nextRun}` : health.lastDiscoveredAt ? `目录更新于 ${formatTime(health.lastDiscoveredAt)}` : nextRun;
+    : health.running ? `正在检测 ${health.activeModelId || "模型"}...` : health.lastFinishedAt ? `上次检测 ${formatTime(health.lastFinishedAt)}，${scanCopy}` : health.lastDiscoveredAt ? `目录更新于 ${formatTime(health.lastDiscoveredAt)}，${scanCopy}` : scanCopy;
   elements.modelHealthDiscover.disabled = Boolean(health.discovering || health.running);
   elements.modelHealthDiscover.textContent = health.discovering ? "读取中" : "刷新模型";
-  elements.modelHealthRun.disabled = Boolean(health.running);
-  elements.modelHealthRun.textContent = health.running ? "检测中" : "开始检测";
   elements.modelHealthSummary.innerHTML = `<span class="health-count good">可用 ${numeric(totals.healthy)}</span><span class="health-count warning">限流 ${numeric(totals.limited)}</span><span class="health-count bad">不可用 ${numeric(totals.unavailable) + numeric(totals.unauthorized)}</span><span class="health-count neutral">待检测 ${numeric(totals.pending) + numeric(totals.checking)}</span><span class="health-count neutral">已发现 ${models.length}</span>${health.lastError ? `<span class="health-error">${escapeHtml(health.lastError)}</span>` : ""}`;
   if (models.length === 0) {
-    elements.modelHealthBody.innerHTML = `<tr><td colspan="6" class="empty-table">${health.discovering || health.running ? "正在获取上游模型列表..." : "尚未发现可检测的模型。"}</td></tr>`;
+    elements.modelHealthBody.innerHTML = `<tr><td colspan="7" class="empty-table">${health.discovering || health.running ? "正在获取上游模型列表..." : "尚未发现可检测的模型。"}</td></tr>`;
     return;
   }
   elements.modelHealthBody.innerHTML = models.map((model) => {
     const meta = modelHealthMeta(model.status);
-    return `<tr><td><code>${escapeHtml(model.id)}</code></td><td><span class="table-status ${meta.className}">${meta.label}</span></td><td>${model.latencyMs ? `${formatNumber(model.latencyMs)} ms` : "-"}</td><td>${model.httpStatus || "-"}</td><td>${escapeHtml(formatTime(model.checkedAt))}</td><td class="model-health-message">${escapeHtml(model.message || "-")}</td></tr>`;
+    const testing = health.running && health.activeModelId === model.id;
+    return `<tr><td><code>${escapeHtml(model.id)}</code></td><td><span class="table-status ${meta.className}">${meta.label}</span></td><td>${model.latencyMs ? `${formatNumber(model.latencyMs)} ms` : "-"}</td><td>${model.httpStatus || "-"}</td><td>${escapeHtml(formatTime(model.checkedAt))}</td><td class="model-health-message">${escapeHtml(model.message || "-")}</td><td><button class="button button-secondary model-check" type="button" data-model-id="${escapeHtml(model.id)}" ${health.running ? "disabled" : ""}>${testing ? "检测中" : "检测"}</button></td></tr>`;
   }).join("");
 }
 
@@ -317,7 +336,23 @@ function renderAccount(account) {
 }
 
 function renderPool(accounts) {
-  elements.poolBody.innerHTML = accounts.map((account) => {
+  const filtered = accounts.filter(matchesPoolFilter);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / POOL_PAGE_SIZE));
+  state.poolPage = Math.min(Math.max(state.poolPage, 1), pageCount);
+  const offset = (state.poolPage - 1) * POOL_PAGE_SIZE;
+  const pageAccounts = filtered.slice(offset, offset + POOL_PAGE_SIZE);
+  const start = filtered.length ? offset + 1 : 0;
+  const end = Math.min(offset + POOL_PAGE_SIZE, filtered.length);
+  elements.poolSearch.value = state.poolQuery;
+  elements.poolCategory.value = state.poolCategory;
+  elements.poolPageSummary.textContent = `${start}-${end} / ${filtered.length} 个账户`;
+  elements.poolPagePrev.disabled = state.poolPage <= 1;
+  elements.poolPageNext.disabled = state.poolPage >= pageCount;
+  if (pageAccounts.length === 0) {
+    elements.poolBody.innerHTML = `<tr><td colspan="6" class="empty-table">没有符合当前筛选条件的账户。</td></tr>`;
+    return;
+  }
+  elements.poolBody.innerHTML = pageAccounts.map((account) => {
     const status = availabilityMeta(account.quota.availability);
     const identity = account.identity?.name || account.identity?.email || account.id;
     const plan = accountTypeLabel(account.referral?.currentPlan || account.identity?.accountType) || "普通用户";
@@ -331,6 +366,33 @@ function renderPool(accounts) {
       <td><div class="account-actions"><button class="button button-secondary account-renew" type="button" data-renew-account="${escapeHtml(account.key)}">续期</button><button class="button button-secondary account-delete" type="button" data-account-key="${escapeHtml(account.key)}">删除</button></div></td>
     </tr>`;
   }).join("");
+}
+
+function changePoolPage(direction) {
+  const accounts = state.data?.accounts || [];
+  const filtered = accounts.filter(matchesPoolFilter);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / POOL_PAGE_SIZE));
+  state.poolPage = Math.min(pageCount, Math.max(1, state.poolPage + direction));
+  renderPool(accounts);
+}
+
+function matchesPoolFilter(account) {
+  const category = poolCategory(account);
+  if (state.poolCategory !== "all" && category !== state.poolCategory) return false;
+  const query = state.poolQuery.trim().toLocaleLowerCase();
+  if (!query) return true;
+  const values = [account.key, account.id, account.identity?.name, account.identity?.email];
+  return values.some((value) => String(value || "").toLocaleLowerCase().includes(query));
+}
+
+function poolCategory(account) {
+  if (!account.loggedIn) return "logged-out";
+  const plan = accountTypeLabel(account.referral?.currentPlan || account.identity?.accountType) || "普通用户";
+  const normalized = plan.toLocaleLowerCase();
+  if (normalized === "max") return "max";
+  if (normalized === "plus") return "plus";
+  if (plan === "普通用户") return "standard";
+  return "member";
 }
 
 async function requestMirasimCode(event) {
@@ -572,16 +634,17 @@ async function discoverModels() {
   }
 }
 
-async function runModelHealthCheck() {
-  setBusy(elements.modelHealthRun, true, "启动中");
+async function checkModel(event) {
+  const button = event.target.closest("[data-model-id]");
+  if (!button) return;
+  setBusy(button, true, "检测中");
   try {
-    const result = await request("/api/model-health/run", { method: "POST" });
+    const result = await request(`/api/model-health/${encodeURIComponent(button.dataset.modelId)}/check`, { method: "POST" });
     state.modelHealth = result.health;
     renderModelHealth();
-    showNotice("模型健康检测已在后台启动。", "success");
   } catch (error) {
-    showNotice(error.message || "无法启动模型健康检测。", "error");
-    setBusy(elements.modelHealthRun, false, "开始检测");
+    showNotice(error.message || "模型检测失败。", "error");
+    setBusy(button, false, "检测");
   }
 }
 

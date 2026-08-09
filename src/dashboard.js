@@ -131,7 +131,7 @@ export class MirasimDashboard {
     const home = this.#homeForKey(key);
     if (!this.sessionRefresher) throw httpError(501, "当前服务未启用登录续期。");
     const renewed = await this.sessionRefresher.refreshNow(home);
-    if (!renewed) throw httpError(409, "官方登录态无法续期，请重新登录该账号。");
+    if (!renewed) throw httpError(409, this.sessionRefresher.failureReason(home) || "官方登录态无法续期，请重新登录该账号。");
     return { renewed: true };
   }
 

@@ -51,6 +51,7 @@ test("keeps an expired profile unchanged when Mirasim rejects its refresh token"
     });
     assert.equal(await refresher.refreshIfNeeded(home), false);
     assert.deepEqual(JSON.parse(readFileSync(join(home, "setting.json"), "utf8")), initial);
+    assert.match(refresher.failureReason(home), /invalid refresh token/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

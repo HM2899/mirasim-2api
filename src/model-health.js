@@ -1,6 +1,4 @@
-import { randomUUID } from "node:crypto";
-
-const DEFAULT_INTERVAL_MS = 30 * 60_000;
+const DEFAULT_SCAN_INTERVAL_MS = 60_000;
 const DEFAULT_TIMEOUT_MS = 12_000;
 
 export class MirasimModelHealth {
@@ -9,21 +7,23 @@ export class MirasimModelHealth {
   #timer = null;
   #state;
 
-  constructor(config, pool, { fetchImpl = fetch, sessionRefresher = null, database = null, now = () => Date.now() } = {}) {
+  constructor(config, pool, { fetchImpl = fetch, sessionRefresher = null, relaySessions = null, database = null, now = () => Date.now() } = {}) {
     this.config = config;
     this.pool = pool;
     this.fetchImpl = fetchImpl;
     this.sessionRefresher = sessionRefresher;
+    this.relaySessions = relaySessions;
     this.database = database;
     this.now = now;
-    this.intervalMs = positiveNumber(config.modelHealthIntervalMs, DEFAULT_INTERVAL_MS);
+    this.scanIntervalMs = positiveNumber(config.modelHealthIntervalMs, DEFAULT_SCAN_INTERVAL_MS);
     this.timeoutMs = positiveNumber(config.modelHealthTimeoutMs, DEFAULT_TIMEOUT_MS);
     const saved = database?.getModelHealth?.();
     this.#state = {
       discovering: false,
       running: false,
-      intervalMs: this.intervalMs,
+      scanIntervalMs: this.scanIntervalMs,
       activeModelId: null,
+      nextScanIndex: Number.isInteger(saved?.nextScanIndex) && saved.nextScanIndex >= 0 ? saved.nextScanIndex : 0,
       lastDiscoveredAt: saved?.lastDiscoveredAt || null,
       lastStartedAt: saved?.lastStartedAt || null,
       lastFinishedAt: saved?.lastFinishedAt || null,
@@ -34,9 +34,8 @@ export class MirasimModelHealth {
 
   start() {
     if (this.#timer) return;
-    // Discovery is cheap and makes the model directory visible before any probe is sent.
-    void this.discover();
-    this.#timer = setInterval(() => void this.run(), this.intervalMs);
+    void this.discover().catch(() => {});
+    this.#timer = setInterval(() => void this.scanNext().catch(() => {}), this.scanIntervalMs);
     this.#timer.unref?.();
   }
 
@@ -50,6 +49,13 @@ export class MirasimModelHealth {
     return { ...this.#state, models: this.#state.models.map((model) => ({ ...model })) };
   }
 
+  async current() {
+    if (this.#state.models.length === 0 && !this.#state.discovering) {
+      await this.discover().catch(() => {});
+    }
+    return this.snapshot();
+  }
+
   async discover() {
     if (this.#discovering) return this.#discovering;
     const task = this.#discover().finally(() => { this.#discovering = null; });
@@ -57,11 +63,27 @@ export class MirasimModelHealth {
     return task;
   }
 
-  async run() {
-    if (this.#running) return this.#running;
-    const task = this.#run().finally(() => { this.#running = null; });
+  async runOne(id) {
+    const modelId = typeof id === "string" ? id.trim() : "";
+    if (!modelId) throw requestError(400, "缺少模型标识。");
+    if (this.#running) throw requestError(409, `正在检测 ${this.#state.activeModelId || "其他模型"}。`);
+    if (!this.#state.models.some((model) => model.id === modelId)) await this.discover();
+    if (!this.#state.models.some((model) => model.id === modelId)) throw requestError(404, "未找到该模型。");
+    const task = this.#runOne(modelId).finally(() => { this.#running = null; });
     this.#running = task;
     return task;
+  }
+
+  async scanNext() {
+    if (this.#running) return this.snapshot();
+    if (this.#state.models.length === 0) await this.discover();
+    const models = this.#state.models;
+    if (models.length === 0) return this.snapshot();
+    const index = this.#state.nextScanIndex % models.length;
+    const modelId = models[index].id;
+    this.#state = { ...this.#state, nextScanIndex: (index + 1) % models.length };
+    this.#persist();
+    return this.runOne(modelId);
   }
 
   async #discover() {
@@ -73,6 +95,7 @@ export class MirasimModelHealth {
       this.#state = {
         ...this.#state,
         discovering: false,
+        nextScanIndex: ids.length ? this.#state.nextScanIndex % ids.length : 0,
         lastDiscoveredAt: new Date(this.now()).toISOString(),
         models: ids.map((id) => previous.get(id) || pendingResult(id))
       };
@@ -85,25 +108,24 @@ export class MirasimModelHealth {
     }
   }
 
-  async #run() {
-    this.#state = { ...this.#state, running: true, lastStartedAt: new Date(this.now()).toISOString(), lastError: null };
+  async #runOne(id) {
+    this.#state = { ...this.#state, running: true, activeModelId: id, lastStartedAt: new Date(this.now()).toISOString(), lastError: null };
     try {
-      const modelIds = await this.discover();
-      // One request at a time prevents a health pass from creating a rate-limit burst.
-      for (const id of modelIds) {
-        this.#state = { ...this.#state, activeModelId: id };
-        const checked = await this.#probe(id);
-        this.#state = { ...this.#state, models: this.#state.models.map((model) => model.id === id ? checked : model) };
-        this.#persist();
-      }
-      this.#state = { ...this.#state, running: false, activeModelId: null, lastFinishedAt: new Date(this.now()).toISOString() };
+      const checked = await this.#probe(id);
+      this.#state = {
+        ...this.#state,
+        running: false,
+        activeModelId: null,
+        lastFinishedAt: new Date(this.now()).toISOString(),
+        models: this.#state.models.map((model) => model.id === id ? checked : model)
+      };
     } catch (error) {
       this.#state = {
         ...this.#state,
         running: false,
         activeModelId: null,
         lastFinishedAt: new Date(this.now()).toISOString(),
-        lastError: error?.message || "模型健康检测未完成。"
+        lastError: error?.message || "模型检测未完成。"
       };
     }
     this.#persist();
@@ -122,9 +144,12 @@ export class MirasimModelHealth {
 
   async #discoverModels() {
     const profile = this.pool.pick();
-    if (!profile) throw new Error("没有可用的已登录账号，无法获取模型列表。");
-    const response = await this.#request("/v1/models", { method: "GET", headers: healthHeaders(profile.token) });
-    if (!response.ok) throw new Error(`上游模型列表请求失败（HTTP ${response.status}）。`);
+    if (!profile) throw requestError(503, "没有可用的已登录账号，无法获取模型列表。");
+    const response = await this.#request("/v1/models", {
+      method: "GET",
+      headers: await this.#headers(profile, "GET", "/v1/models")
+    });
+    if (!response.ok) throw requestError(502, `上游模型列表请求失败（HTTP ${response.status}）。`);
     const body = await response.json().catch(() => null);
     const discovered = Array.isArray(body?.data)
       ? body.data.map((item) => typeof item?.id === "string" ? item.id.trim() : "").filter(callableModelId)
@@ -139,10 +164,11 @@ export class MirasimModelHealth {
     const profile = this.pool.pick();
     if (!profile) return result(id, "unavailable", checkedAt, this.now() - startedAt, 0, "没有可用的已登录账号。");
     try {
+      const body = JSON.stringify(probePayload(id));
       const response = await this.#request("/v1/chat/completions", {
         method: "POST",
-        headers: healthHeaders(profile.token),
-        body: JSON.stringify({ model: id, messages: [{ role: "user", content: "Reply exactly OK." }], max_tokens: 1, temperature: 0, stream: false })
+        headers: await this.#headers(profile, "POST", "/v1/chat/completions", body),
+        body
       });
       const latencyMs = this.now() - startedAt;
       if (response.ok) return result(id, "healthy", checkedAt, latencyMs, response.status, "可正常响应。");
@@ -162,53 +188,30 @@ export class MirasimModelHealth {
       clearTimeout(timer);
     }
   }
+
+  async #headers(profile, method, path, body = "") {
+    if (this.relaySessions) return this.relaySessions.headersFor(profile, { method, path, body });
+    return { Accept: "application/json", "Content-Type": "application/json", "x-mirasim-client": "0.0.147", Authorization: `Bearer ${profile.token}` };
+  }
 }
 
-function healthHeaders(token) {
-  return {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    "x-mirasim-client": "0.0.147",
-    "x-mirasim-call": randomUUID(),
-    Authorization: `Bearer ${token}`
-  };
+function pendingResult(id) { return result(id, "pending", null, null, null, "尚未检测。"); }
+function result(id, status, checkedAt, latencyMs, httpStatus, message) { return { id, status, checkedAt, latencyMs: Number.isFinite(latencyMs) ? Math.max(0, Math.round(latencyMs)) : null, httpStatus, message }; }
+function stateForStatus(status) { return status === 429 ? "limited" : status === 401 || status === 403 ? "unauthorized" : "unavailable"; }
+function errorMessage(data, status) { const message = data?.error?.message || data?.message || data?.detail; return typeof message === "string" && message.trim() ? message.trim().slice(0, 240) : `上游返回 HTTP ${status}。`; }
+function positiveNumber(value, fallback) { return Number.isInteger(value) && value > 0 ? value : fallback; }
+function callableModelId(value) { return typeof value === "string" && value.trim() !== "" && value.trim() !== "*"; }
+function requestError(statusCode, message) { const error = new Error(message); error.statusCode = statusCode; return error; }
+function probePayload(id) {
+  const payload = { model: id, messages: [{ role: "user", content: "Reply exactly OK." }], max_tokens: 1, stream: false };
+  // Kimi-K3 rejects temperature: 0 while accepting the same OpenAI chat shape without it.
+  if (id !== "kimi-k3") payload.temperature = 0;
+  return payload;
 }
-
-function pendingResult(id) {
-  return result(id, "pending", null, null, null, "尚未检测。");
-}
-
-function result(id, status, checkedAt, latencyMs, httpStatus, message) {
-  return { id, status, checkedAt, latencyMs: Number.isFinite(latencyMs) ? Math.max(0, Math.round(latencyMs)) : null, httpStatus, message };
-}
-
-function stateForStatus(status) {
-  if (status === 429) return "limited";
-  if (status === 401 || status === 403) return "unauthorized";
-  return "unavailable";
-}
-
-function errorMessage(data, status) {
-  const message = data?.error?.message || data?.message || data?.detail;
-  return typeof message === "string" && message.trim() ? message.trim().slice(0, 240) : `上游返回 HTTP ${status}。`;
-}
-
-function positiveNumber(value, fallback) {
-  return Number.isInteger(value) && value > 0 ? value : fallback;
-}
-
-function callableModelId(value) {
-  return typeof value === "string" && value.trim() !== "" && value.trim() !== "*";
-}
-
 function savedModels(models) {
   if (!Array.isArray(models)) return [];
   return models.flatMap((model) => {
     if (!model || typeof model.id !== "string" || !callableModelId(model.id)) return [];
-    const status = typeof model.status === "string" ? model.status : "pending";
-    return [result(model.id.trim(), status, typeof model.checkedAt === "string" ? model.checkedAt : null,
-      Number.isFinite(model.latencyMs) ? model.latencyMs : null,
-      Number.isInteger(model.httpStatus) ? model.httpStatus : null,
-      typeof model.message === "string" ? model.message : "尚未检测。")];
+    return [result(model.id.trim(), typeof model.status === "string" ? model.status : "pending", typeof model.checkedAt === "string" ? model.checkedAt : null, Number.isFinite(model.latencyMs) ? model.latencyMs : null, Number.isInteger(model.httpStatus) ? model.httpStatus : null, typeof model.message === "string" ? model.message : "尚未检测。")];
   });
 }

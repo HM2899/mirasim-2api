@@ -135,6 +135,33 @@ test("official Plus and Max plans take priority over a generic user role", async
   assert.match(nodes.get("#pool-body").innerHTML, /Plus/);
 });
 
+test("account pool filters by category and search term, then paginates results", async () => {
+  const accounts = Array.from({ length: 12 }, (_, index) => ({
+    ...JSON.parse(JSON.stringify(dashboard.accounts[0])),
+    key: `account-${index + 1}`,
+    id: `user-${index + 1}`,
+    identity: { name: `Member ${index + 1}`, email: `member-${index + 1}@example.test`, accountType: index === 10 ? "MAX" : "普通用户" },
+    referral: index === 10 ? { ...dashboard.accounts[0].referral, currentPlan: "MAX" } : { ...dashboard.accounts[0].referral, currentPlan: "普通用户" }
+  }));
+  const { api, nodes } = loadDashboardUi({ ...dashboard, accounts });
+  await api.loadDashboard();
+  assert.match(nodes.get("#pool-page-summary").textContent, /1-10 \/ 12/);
+  api.changePoolPage(1);
+  assert.match(nodes.get("#pool-body").innerHTML, /Member 11/);
+  assert.match(nodes.get("#pool-page-summary").textContent, /11-12 \/ 12/);
+
+  nodes.get("#pool-category").value = "max";
+  api.setPoolFilters();
+  assert.match(nodes.get("#pool-body").innerHTML, /Member 11/);
+  assert.doesNotMatch(nodes.get("#pool-body").innerHTML, /Member 12/);
+
+  nodes.get("#pool-category").value = "all";
+  nodes.get("#pool-search").value = "member-12@example.test";
+  api.setPoolFilters();
+  assert.match(nodes.get("#pool-body").innerHTML, /Member 12/);
+  assert.match(nodes.get("#pool-page-summary").textContent, /1-1 \/ 1/);
+});
+
 function loadDashboardUi(dashboardData = dashboard) {
   const nodes = new Map();
   const context = {
@@ -148,8 +175,8 @@ function loadDashboardUi(dashboardData = dashboard) {
           : { configured: false, url: "", domain: "" });
       }
       if (url === "/api/model-health") return json(modelHealth);
-      if (url === "/api/model-health/run") return json({ started: true, health: { ...modelHealth, running: true } });
       if (url === "/api/model-health/discover") return json({ started: true, health: { ...modelHealth, discovering: true } });
+      if (url.startsWith("/api/model-health/") && url.endsWith("/check")) return json({ health: { ...modelHealth, running: false } });
       if (url === "/api/accounts/restore") return json({ restored: 1, accounts: ["account-2"] });
       if (url === "/api/invites/redeem") return json({ updated: true });
       if (url === "/api/mirasim/login/verify") return json({ updated: true });
@@ -165,7 +192,7 @@ function loadDashboardUi(dashboardData = dashboard) {
   const source = readFileSync(new URL("../public/dashboard.js", import.meta.url), "utf8");
   const withoutAutoLoad = source.replace("loadDashboard();\nsetInterval(loadDashboard, 60_000);", "");
   assert.notEqual(withoutAutoLoad, source, "dashboard startup hook should be present");
-  vm.runInNewContext(`${withoutAutoLoad}\nglobalThis.dashboardTestApi = { loadDashboard, redeemInvite, openMirasimLogin, closeMirasimLogin, verifyMirasimLogin, registerWithMoeMail, saveMoeMailConfig, runModelHealthCheck, setView };`, context, { filename: "dashboard.js" });
+  vm.runInNewContext(`${withoutAutoLoad}\nglobalThis.dashboardTestApi = { loadDashboard, redeemInvite, openMirasimLogin, closeMirasimLogin, verifyMirasimLogin, registerWithMoeMail, saveMoeMailConfig, checkModel, setView, changePoolPage, setPoolFilters: () => { state.poolQuery = elements.poolSearch.value.trim(); state.poolCategory = elements.poolCategory.value; state.poolPage = 1; renderPool(state.data.accounts); } };`, context, { filename: "dashboard.js" });
   return { api: context.dashboardTestApi, nodes };
 }
 

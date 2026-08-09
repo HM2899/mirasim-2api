@@ -11,6 +11,7 @@ import { WebAuth } from "./web-auth.js";
 import { StateDatabase } from "./database.js";
 import { MirasimSessionRefresher } from "./session-refresh.js";
 import { MirasimModelHealth } from "./model-health.js";
+import { MirasimRelaySessions } from "./relay-device.js";
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const RESPONSE_HEADERS = new Set(["content-type", "cache-control", "retry-after", "x-request-id", "openai-processing-ms"]);
@@ -30,13 +31,14 @@ export function createGateway(config, { fetchImpl = fetch, logger = console } = 
   const pool = new MirasimProfilePool(config.homes, { cooldownMs: config.cooldownMs });
   const usage = new RelayUsageLedger();
   const sessions = new MirasimSessionRefresher(config, { fetchImpl });
-  const modelHealth = new MirasimModelHealth(config, pool, { fetchImpl, sessionRefresher: sessions, database });
+  const relaySessions = new MirasimRelaySessions(config, { fetchImpl });
+  const modelHealth = new MirasimModelHealth(config, pool, { fetchImpl, sessionRefresher: sessions, relaySessions, database });
   const dashboard = new MirasimDashboard(config, pool, usage, { fetchImpl, database, sessionRefresher: sessions });
   const webAuth = new WebAuth(config.webAuth, { database });
   const apiKeys = new OpenAIKeyStore(database);
   const server = createServer(async (request, response) => {
     try {
-      await handleRequest(request, response, config, pool, usage, dashboard, sessions, modelHealth, webAuth, apiKeys, fetchImpl);
+      await handleRequest(request, response, config, pool, usage, dashboard, sessions, relaySessions, modelHealth, webAuth, apiKeys, fetchImpl);
     } catch (error) {
       logger.error?.("mirasim relay proxy failed", error);
       if (!response.headersSent) sendProtocolError(response, protocolForPath(request.url), error.statusCode || 502, error.message || "The relay request failed.");
@@ -48,7 +50,7 @@ export function createGateway(config, { fetchImpl = fetch, logger = console } = 
   return server;
 }
 
-async function handleRequest(request, response, config, pool, usage, dashboard, sessions, modelHealth, webAuth, apiKeys, fetchImpl) {
+async function handleRequest(request, response, config, pool, usage, dashboard, sessions, relaySessions, modelHealth, webAuth, apiKeys, fetchImpl) {
   const url = new URL(request.url || "/", "http://gateway.local");
   if (request.method === "POST" && url.pathname === "/api/auth/login") {
     const body = await readJson(request);
@@ -71,15 +73,15 @@ async function handleRequest(request, response, config, pool, usage, dashboard, 
     return sendJson(response, 200, await dashboard.snapshot());
   }
   if (request.method === "GET" && url.pathname === "/api/model-health") {
-    return sendJson(response, 200, modelHealth.snapshot());
-  }
-  if (request.method === "POST" && url.pathname === "/api/model-health/run") {
-    void modelHealth.run();
-    return sendJson(response, 202, { started: true, health: modelHealth.snapshot() });
+    return sendJson(response, 200, await modelHealth.current());
   }
   if (request.method === "POST" && url.pathname === "/api/model-health/discover") {
-    void modelHealth.discover();
-    return sendJson(response, 202, { started: true, health: modelHealth.snapshot() });
+    await modelHealth.discover();
+    return sendJson(response, 200, { health: modelHealth.snapshot() });
+  }
+  const modelCheck = /^\/api\/model-health\/([^/]+)\/check$/.exec(url.pathname);
+  if (request.method === "POST" && modelCheck) {
+    return sendJson(response, 200, { health: await modelHealth.runOne(decodeURIComponent(modelCheck[1])) });
   }
   if (request.method === "POST" && url.pathname === "/api/referral") {
     const body = await readJson(request);
@@ -147,7 +149,7 @@ async function handleRequest(request, response, config, pool, usage, dashboard, 
     if (!apiKeys.authenticate(clientApiKey(request, protocol))) return sendProtocolError(response, protocol, 401, "Missing or invalid API key.");
   }
   if (request.method === "GET" && url.pathname === "/v1/models") {
-    return sendJson(response, 200, await modelList(config, pool, fetchImpl, sessions));
+    return sendJson(response, 200, await modelList(config, pool, fetchImpl, sessions, relaySessions));
   }
   if (request.method === "POST" && url.pathname === "/v1/responses") {
     const body = await readBody(request);
@@ -167,7 +169,8 @@ async function handleRequest(request, response, config, pool, usage, dashboard, 
       (downstream, upstream) => translated.stream
         ? forwardResponsesStream(downstream, upstream, translated.request)
         : forwardResponsesResponse(downstream, upstream, translated.request),
-      sessions
+      sessions,
+      relaySessions
     );
   }
   if (request.method !== "POST" || !PROXY_PATHS.has(url.pathname)) {
@@ -175,17 +178,17 @@ async function handleRequest(request, response, config, pool, usage, dashboard, 
   }
 
   const body = await readBody(request);
-  return relayRequest(request, response, config, pool, usage, fetchImpl, url, body, protocol, forwardResponse, sessions);
+  return relayRequest(request, response, config, pool, usage, fetchImpl, url, body, protocol, forwardResponse, sessions, relaySessions);
 }
 
-async function relayRequest(request, response, config, pool, usage, fetchImpl, url, body, protocol = "openai", responseHandler = forwardResponse, sessions = null) {
+async function relayRequest(request, response, config, pool, usage, fetchImpl, url, body, protocol = "openai", responseHandler = forwardResponse, sessions = null, relaySessions = null) {
   await sessions?.refreshAll(config.homes);
   const excluded = new Set();
   let profile;
   let upstream;
 
   while ((profile = pool.pick(excluded))) {
-    upstream = await fetchRelay(request, config, profile, fetchImpl, url, body);
+    upstream = await fetchRelay(request, config, profile, fetchImpl, url, body, relaySessions);
     if (upstream.networkError || retryableStatus(upstream.status)) {
       excluded.add(profile.home);
       pool.failure(profile, retryAfterMs(upstream.headers?.get?.("retry-after")));
@@ -212,7 +215,7 @@ async function relayRequest(request, response, config, pool, usage, fetchImpl, u
   return responseHandler(response, upstream);
 }
 
-async function fetchRelay(request, config, profile, fetchImpl, url, body) {
+async function fetchRelay(request, config, profile, fetchImpl, url, body, relaySessions = null) {
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
@@ -221,7 +224,15 @@ async function fetchRelay(request, config, profile, fetchImpl, url, body) {
   }, firstByteTimeout(config));
   const abortOnClientDisconnect = () => controller.abort();
   request.once("aborted", abortOnClientDisconnect);
-  const headers = relayHeaders(request.headers, profile.token);
+  const headers = await relayRequestHeaders(relaySessions, profile, {
+    method: "POST",
+    path: url.pathname,
+    body,
+    accept: request.headers.accept || "application/json",
+    contentType: request.headers["content-type"] || "application/json"
+  });
+  if (request.headers["anthropic-beta"]) headers["anthropic-beta"] = request.headers["anthropic-beta"];
+  if (request.headers["anthropic-version"]) headers["anthropic-version"] = request.headers["anthropic-version"];
 
   try {
     return await fetchImpl(new URL(url.pathname + url.search, `${config.relayUrl}/`), {
@@ -239,7 +250,7 @@ async function fetchRelay(request, config, profile, fetchImpl, url, body) {
   }
 }
 
-async function modelList(config, pool, fetchImpl, sessions = null) {
+async function modelList(config, pool, fetchImpl, sessions = null, relaySessions = null) {
   await sessions?.refreshAll(config.homes);
   const profile = pool.pick();
   if (!profile) return configuredModels(config);
@@ -248,7 +259,7 @@ async function modelList(config, pool, fetchImpl, sessions = null) {
   const timeout = setTimeout(() => controller.abort(), modelListTimeout(config));
   try {
     const upstream = await fetchImpl(new URL("/v1/models", `${config.relayUrl}/`), {
-      headers: relayHeaders({ accept: "application/json" }, profile.token),
+      headers: await relayRequestHeaders(relaySessions, profile, { method: "GET", path: "/v1/models", accept: "application/json" }),
       signal: controller.signal,
       redirect: "error"
     });
@@ -607,6 +618,14 @@ export function relayHeaders(incoming, token) {
   // This token comes from the official Mirasim login profile, never from caller input.
   headers.Authorization = `Bearer ${token}`;
   return headers;
+}
+
+async function relayRequestHeaders(relaySessions, profile, options) {
+  if (relaySessions) return relaySessions.headersFor(profile, options);
+  return relayHeaders({
+    accept: options.accept,
+    "content-type": options.contentType
+  }, profile.token);
 }
 
 function serveStatic(response, asset) {
