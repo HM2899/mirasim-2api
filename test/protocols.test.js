@@ -294,6 +294,48 @@ test("a request offering a server-side search tool is told when to search", asyn
   }
 });
 
+// Anthropic runs a server tool itself and reports it as server_tool_use, which the OpenAI
+// protocols cannot describe — a converting gateway drops the block and the search becomes
+// invisible to the client even though it ran. Carrying it through as text survives that.
+test("a server tool the relay ran is surfaced as text the client can see", async () => {
+  const upstream = [
+    'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":5}}}\n\n',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{}}}\n\n',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"new songs\\"}"}}\n\n',
+    'data: {"type":"content_block_stop","index":0}\n\n',
+    'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Two new songs."}}\n\n',
+    'data: {"type":"content_block_stop","index":1}\n\n',
+    'data: {"type":"message_stop"}\n\n'
+  ].join("");
+  const fixture = gatewayFixture(async () => new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } }));
+
+  try {
+    const key = new OpenAIKeyStore(fixture.apiKeyFile).create("Server tool surface test").key;
+    await fixture.start();
+    const response = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-opus-5", max_tokens: 4096, stream: true,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [{ role: "user", content: "What is new?" }]
+      })
+    });
+    const body = await response.text();
+    // Every frame still parses, and the block kept its index — only its type changed.
+    for (const line of body.split("\n").filter((entry) => entry.startsWith("data:"))) {
+      JSON.parse(line.slice(5).trim());
+    }
+    assert.match(body, /"type":"text","text":"🔍 web_search /, "the call is carried through as text");
+    assert.match(body, /"type":"text_delta","text":"\{\\"query/, "its input becomes that text");
+    assert.doesNotMatch(body, /"content_block":\{"type":"server_tool_use"/, "nothing downstream can read that type");
+    assert.match(body, /Two new songs\./, "the answer itself is untouched");
+  } finally {
+    fixture.close();
+  }
+});
+
 test("a caller's own thinking choice is never overridden on Anthropic Messages", async () => {
   const seen = [];
   const fixture = gatewayFixture(async (url, options) => {
