@@ -24,6 +24,15 @@ export class RelayRequestLog {
       maxTokens: Number.isFinite(value?.max_tokens) ? value.max_tokens
         : Number.isFinite(value?.max_output_tokens) ? value.max_output_tokens : null,
       toolCount: Array.isArray(value?.tools) ? value.tools.length : 0,
+      // Names, because a count cannot answer the question that actually matters: whether the
+      // tool the user asked for is among them. A server tool (web search) carries its
+      // capability in `type`, and a converting gateway that drops the type leaves a tool the
+      // model can name but nothing can run.
+      toolNames: toolNames(value),
+      // What the model actually called back. Without this there is no way to tell a model
+      // that never reached for a tool from one whose call was dropped on the way back to the
+      // client — the symptom ("it didn't search") looks identical from outside.
+      calledTools: [],
       stream: value?.stream === true,
       account: null,
       status: null,
@@ -92,6 +101,7 @@ export class RelayRequestLog {
         if (buffer) scanSseFrame(buffer, entry);
       } else {
         const payload = parseJsonObject(buffer);
+        recordCalledTools(entry, payload?.content);
         mergeUsage(entry, payload?.usage);
         mergeUsage(entry, payload?.message?.usage);
         // Some relays answer an Anthropic-shaped request with OpenAI-compatible
@@ -155,6 +165,7 @@ function scanSseFrame(frame, entry) {
   if (!event) return false;
   // Anthropic streams report usage on message_start/message_delta; OpenAI chunks
   // and Responses events carry a usage object on the frame itself.
+  if (event.type === "content_block_start") recordCalledTools(entry, [event.content_block]);
   const merged = mergeUsage(entry, event.usage);
   mergeUsage(entry, event.message?.usage);
   mergeUsage(entry, event.response?.usage);
@@ -211,5 +222,30 @@ function parseJsonObject(value) {
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
   } catch {
     return null;
+  }
+}
+
+// Anthropic names a custom tool directly and a server tool by `type`; the OpenAI protocols
+// nest it under `function`. Capped, because a tool list can be long and this is a log.
+function toolNames(value) {
+  if (!Array.isArray(value?.tools)) return [];
+  return value.tools.slice(0, 64).map((tool) => {
+    if (!tool || typeof tool !== "object") return "?";
+    const name = typeof tool.name === "string" && tool.name ? tool.name
+      : typeof tool.function?.name === "string" ? tool.function.name : "";
+    const type = typeof tool.type === "string" && tool.type && tool.type !== "function" ? tool.type : "";
+    return type && type !== name ? `${name || "?"}<${type}>` : (name || "?");
+  });
+}
+
+// A tool the model invoked, named the way the request named it: a server tool by its type,
+// a client tool by its name. Deduped, since a streamed block can be seen more than once.
+function recordCalledTools(entry, blocks) {
+  if (!Array.isArray(blocks) || !Array.isArray(entry.calledTools)) return;
+  for (const block of blocks) {
+    const type = block?.type;
+    if (type !== "tool_use" && type !== "server_tool_use") continue;
+    const label = typeof block.name === "string" && block.name ? block.name : type;
+    if (!entry.calledTools.includes(label)) entry.calledTools.push(label);
   }
 }
