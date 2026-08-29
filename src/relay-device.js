@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 const DEVICE_SESSION_PATH = "/v1/device/session";
 const RENEW_BEFORE_MS = 5 * 60_000;
+const DEFAULT_MINT_BACKOFF_MS = 15 * 60_000;
 
 // The official relay now issues short-lived tickets bound to an Ed25519 device key.
 // Keep private keys in each local profile; tickets are intentionally memory-only.
@@ -19,11 +20,11 @@ export class MirasimRelaySessions {
 
   async headersFor(profile, { method, path, body = "", accept = "application/json", contentType = "application/json" } = {}) {
     const device = this.enabled ? this.#device(profile.home) : null;
-    if (!device) return baseHeaders(profile.token, accept, contentType);
+    if (!device) return baseHeaders(profile, accept, contentType, this.config.clientVersion);
     const state = await this.#ticket(profile, device);
-    if (!state?.ticket) return baseHeaders(profile.token, accept, contentType);
+    if (!state?.ticket) return baseHeaders(profile.token, accept, contentType, this.config.clientVersion);
     return {
-      ...baseHeaders(state.ticket, accept, contentType),
+      ...baseHeaders({ ...profile, token: state.ticket }, accept, contentType, this.config.clientVersion),
       ...signedHeaders(device, method, path, body)
     };
   }
@@ -32,13 +33,17 @@ export class MirasimRelaySessions {
     const existing = this.#states.get(profile.home);
     if (existing?.token === profile.token && existing.ticket && existing.expiresAt > this.now() + RENEW_BEFORE_MS) return existing;
     if (existing?.inFlight) return existing.inFlight;
+    if (existing?.retryAt > this.now()) return existing;
 
     const state = existing || { token: profile.token, ticket: null, expiresAt: 0, inFlight: null };
     state.token = profile.token;
     const task = this.#mint(profile.token, device).then((minted) => {
-      if (minted) {
+      if (minted?.ticket) {
         state.ticket = minted.ticket;
         state.expiresAt = minted.expiresAt;
+        state.retryAt = 0;
+      } else if (minted?.retryAt) {
+        state.retryAt = minted.retryAt;
       }
       return state;
     }).catch(() => state).finally(() => { state.inFlight = null; });
@@ -51,11 +56,17 @@ export class MirasimRelaySessions {
     const body = JSON.stringify({ publicKey: device.publicKey, deviceId: device.id });
     const response = await this.fetchImpl(new URL(DEVICE_SESSION_PATH, `${this.config.relayUrl}/`), {
       method: "POST",
-      headers: { ...baseHeaders(token), ...signedHeaders(device, "POST", DEVICE_SESSION_PATH, body) },
+      headers: { ...baseHeaders({ token }, "application/json", "application/json", this.config.clientVersion), ...signedHeaders(device, "POST", DEVICE_SESSION_PATH, body) },
       body,
       redirect: "error"
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      const retryAfter = Number(response.headers?.get?.("retry-after"));
+      const delay = Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(retryAfter * 1000, 60 * 60_000)
+        : DEFAULT_MINT_BACKOFF_MS;
+      return response.status === 429 ? { retryAt: this.now() + delay } : null;
+    }
     const data = await response.json().catch(() => null);
     if (typeof data?.ticket !== "string" || !data.ticket) return null;
     const expiresAt = typeof data.expiresIn === "number"
@@ -86,8 +97,21 @@ export class MirasimRelaySessions {
   }
 }
 
-function baseHeaders(token, accept = "application/json", contentType = "application/json") {
-  return { Accept: accept, "Content-Type": contentType, Authorization: `Bearer ${token}`, "x-mirasim-client": "0.0.147", "x-mirasim-call": randomUUID() };
+function baseHeaders(profile, accept = "application/json", contentType = "application/json", clientVersion = "0.0.239") {
+  const token = profile?.token || "";
+  const account = profile?.id || profile?.userId;
+  return {
+    Accept: accept,
+    "Content-Type": contentType,
+    Authorization: `Bearer ${token}`,
+    "x-mirasim-token": token,
+    "x-mirasim-session": profile?.sessionId || profile?.userId || randomUUID(),
+    "x-mirasim-agent": profile?.agent || "mirasim",
+    ...(account ? { "x-mirasim-account": account } : {}),
+    "x-mirasim-client": clientVersion,
+    "x-mirasim-locale": profile?.locale || "en-US",
+    "x-mirasim-call": randomUUID()
+  };
 }
 
 function signedHeaders(device, method, path, body) {

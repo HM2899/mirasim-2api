@@ -35,3 +35,28 @@ test("official relay requests use a persisted device key and reuse a short-lived
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("a rate-limited ticket mint is backed off instead of retried on every request", async () => {
+  const home = mkdtempSync(join(tmpdir(), "mirasim-device-backoff-"));
+  writeFileSync(join(home, "setting.json"), JSON.stringify({ auth: { token: "login-token" } }));
+  let requests = 0;
+  let now = 1_000_000;
+  const sessions = new MirasimRelaySessions({ relayUrl: "https://mirasim-relay.mirofish.ai" }, {
+    now: () => now,
+    fetchImpl: async () => {
+      requests += 1;
+      return new Response("busy", { status: 429, headers: { "retry-after": "120" } });
+    }
+  });
+  try {
+    const profile = { home, token: "login-token" };
+    await sessions.headersFor(profile, { method: "GET", path: "/v1/models" });
+    await sessions.headersFor(profile, { method: "GET", path: "/v1/models" });
+    assert.equal(requests, 1);
+    now += 121_000;
+    await sessions.headersFor(profile, { method: "GET", path: "/v1/models" });
+    assert.equal(requests, 2);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

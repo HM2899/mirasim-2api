@@ -6,10 +6,11 @@ const MAX_NAME_LENGTH = 64;
 const LAST_USED_WRITE_INTERVAL_MS = 60_000;
 
 export class OpenAIKeyStore {
-  constructor(database, { now = () => new Date(), random = randomBytes } = {}) {
+  constructor(database, { now = () => new Date(), random = randomBytes, secret = "" } = {}) {
     this.database = typeof database === "string" ? new StateDatabase(database) : database;
     this.now = now;
     this.random = random;
+    this.secret = secret;
   }
 
   create(name) {
@@ -26,11 +27,18 @@ export class OpenAIKeyStore {
     };
     this.database.db.prepare("INSERT INTO api_keys(id, name, prefix, hash, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, NULL)")
       .run(record.id, record.name, record.prefix, record.hash, record.createdAt);
-    return { key, record: publicRecord(record) };
+    if (this.secret) this.database.saveApiKeySecret(record.id, key, this.secret);
+    return { key, record: publicRecord({ ...record, copyable: Boolean(this.secret) }) };
   }
 
   list() {
-    return this.database.db.prepare("SELECT id, name, prefix, created_at AS createdAt, last_used_at AS lastUsedAt FROM api_keys ORDER BY created_at DESC").all();
+    return this.database.db.prepare("SELECT id, name, prefix, created_at AS createdAt, last_used_at AS lastUsedAt, secret IS NOT NULL AS copyable FROM api_keys ORDER BY created_at DESC").all()
+      .map(publicRecord);
+  }
+
+  reveal(id) {
+    const value = this.secret ? this.database.getApiKeySecret(id, this.secret) : null;
+    return typeof value === "string" && value.startsWith(KEY_PREFIX) ? value : null;
   }
 
   authenticate(key) {
@@ -79,6 +87,7 @@ function publicRecord(record) {
     name: record.name,
     prefix: record.prefix,
     createdAt: record.createdAt,
-    lastUsedAt: record.lastUsedAt || null
+    lastUsedAt: record.lastUsedAt || null,
+    copyable: Boolean(record.copyable)
   };
 }

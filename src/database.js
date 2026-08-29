@@ -22,6 +22,7 @@ export class StateDatabase {
         name TEXT NOT NULL,
         prefix TEXT NOT NULL,
         hash TEXT NOT NULL UNIQUE,
+        secret TEXT,
         created_at TEXT NOT NULL,
         last_used_at TEXT
       );
@@ -29,7 +30,29 @@ export class StateDatabase {
         id_hash TEXT PRIMARY KEY,
         expires_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS usage_ledger (
+        home TEXT PRIMARY KEY,
+        requests INTEGER NOT NULL DEFAULT 0,
+        failures INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        last_at TEXT,
+        last_status INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS usage_calls (
+        home TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        PRIMARY KEY (home, call_id)
+      );
     `);
+    // Existing installations stored API key hashes only. Keep those rows intact;
+    // newly issued keys can opt into encrypted historical-key recovery.
+    try { this.db.exec("ALTER TABLE api_keys ADD COLUMN secret TEXT"); } catch {}
+    try { this.db.exec("ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"); } catch {}
+    // A null priority means "order this account by its plan", which is the default for every row.
+    try { this.db.exec("ALTER TABLE accounts ADD COLUMN priority INTEGER"); } catch {}
     const seeded = this.db.prepare("SELECT value FROM meta WHERE key = 'accounts_seeded'").get();
     if (!seeded) {
       const insert = this.db.prepare("INSERT OR IGNORE INTO accounts(home, created_at) VALUES (?, ?)");
@@ -49,6 +72,22 @@ export class StateDatabase {
 
   removeHome(home) {
     return this.db.prepare("DELETE FROM accounts WHERE home = ?").run(home).changes > 0;
+  }
+
+  disabledHomes() {
+    return this.db.prepare("SELECT home FROM accounts WHERE disabled = 1").all().map((row) => row.home);
+  }
+
+  homePriorities() {
+    return this.db.prepare("SELECT home, priority FROM accounts WHERE priority IS NOT NULL").all().map((row) => ({ home: row.home, priority: Number(row.priority) }));
+  }
+
+  setHomePriority(home, priority) {
+    return this.db.prepare("UPDATE accounts SET priority = ? WHERE home = ?").run(priority === null ? null : Math.round(priority), home).changes > 0;
+  }
+
+  setHomeDisabled(home, disabled) {
+    return this.db.prepare("UPDATE accounts SET disabled = ? WHERE home = ?").run(disabled ? 1 : 0, home).changes > 0;
   }
 
   getMoeMailConfig(secret) {
@@ -80,6 +119,37 @@ export class StateDatabase {
   saveModelHealth(health) {
     this.db.prepare("INSERT INTO settings(key, value) VALUES ('model_health', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(JSON.stringify(health));
+  }
+
+  saveApiKeySecret(id, value, secret) {
+    this.db.prepare("UPDATE api_keys SET secret = ? WHERE id = ?").run(encrypt(value, secret), id);
+  }
+
+  getApiKeySecret(id, secret) {
+    const row = this.db.prepare("SELECT secret FROM api_keys WHERE id = ?").get(id);
+    if (!row?.secret) return null;
+    try { return decrypt(row.secret, secret); } catch { return null; }
+  }
+
+  getUsageLedger(home) {
+    const row = this.db.prepare("SELECT requests, failures, input_tokens AS inputTokens, output_tokens AS outputTokens, cache_read_tokens AS cacheReadTokens, cache_write_tokens AS cacheWriteTokens, last_at AS lastAt, last_status AS lastStatus FROM usage_ledger WHERE home = ?").get(home);
+    return row || null;
+  }
+
+  saveUsageLedger(home, entry) {
+    this.db.prepare(`INSERT INTO usage_ledger(home, requests, failures, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, last_at, last_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(home) DO UPDATE SET requests = excluded.requests, failures = excluded.failures, input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens, cache_read_tokens = excluded.cache_read_tokens, cache_write_tokens = excluded.cache_write_tokens, last_at = excluded.last_at, last_status = excluded.last_status`)
+      .run(home, entry.requests, entry.failures, entry.inputTokens, entry.outputTokens, entry.cacheReadTokens, entry.cacheWriteTokens, entry.lastAt, entry.lastStatus);
+  }
+
+  recordUsageCall(home, callId, totals) {
+    const inserted = this.db.prepare("INSERT OR IGNORE INTO usage_calls(home, call_id) VALUES (?, ?)").run(home, callId).changes > 0;
+    if (inserted) {
+      this.db.prepare("UPDATE usage_ledger SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, cache_read_tokens = cache_read_tokens + ?, cache_write_tokens = cache_write_tokens + ? WHERE home = ?")
+        .run(totals.inputTokens, totals.outputTokens, totals.cacheReadTokens, totals.cacheWriteTokens, home);
+    }
+    return this.getUsageLedger(home);
   }
 
   saveWebSession(id, expiresAt) {

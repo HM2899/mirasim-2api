@@ -18,9 +18,7 @@ test("discovers models then checks only the selected model", async () => {
     fetchImpl: async (url, options) => {
       calls.push({ url: url.href, options });
       if (url.pathname === "/v1/models") return json({ data: [{ id: "healthy-model" }, { id: "limited-model" }, { id: "*" }] });
-      const model = JSON.parse(options.body).model;
-      if (model === "healthy-model") return json({ choices: [] });
-      if (model === "limited-model") return json({ error: { message: "Rate limit exceeded" } }, 429);
+      if (url.pathname === "/v1/limits") return json({ models: { "healthy-model": { available: true } } });
       return json({ error: { message: "Unknown model" } }, 404);
     }
   });
@@ -41,8 +39,8 @@ test("discovers models then checks only the selected model", async () => {
     { id: "limited-model", status: "pending", httpStatus: null }
   ]);
   assert.equal(calls[0].url, "https://relay.example.test/v1/models");
-  assert.equal(calls[1].options.headers.Authorization, "Bearer mirasim-token");
-  assert.equal(JSON.parse(calls[1].options.body).max_tokens, 1);
+  assert.equal(calls[1].url, "https://relay.example.test/v1/limits");
+  assert.equal(calls[1].options.method, "GET");
   assert.equal(calls.some((call) => call.options?.body?.includes('"model":"*"')), false);
 });
 
@@ -51,34 +49,45 @@ test("scheduled scans rotate one model at a time", async () => {
   const health = new MirasimModelHealth({ homes: [], relayUrl: "https://relay.example.test", models: ["model-a", "model-b"] }, {
     pick() { return { token: "mirasim-token" }; }
   }, {
-    fetchImpl: async (url, options) => {
-      calls.push(options.body ? JSON.parse(options.body).model : "directory");
+    fetchImpl: async (url) => {
+      calls.push(url.pathname);
       if (url.pathname === "/v1/models") return json({ data: [] });
-      return json({ choices: [] });
+      return json({ models: {} });
     }
   });
   await health.discover();
-  await health.scanNext();
-  await health.scanNext();
-  assert.deepEqual(calls, ["directory", "model-a", "model-b"]);
+  // The probe is a shared account-level limits check, so the rotation is only visible in the
+  // snapshot: one more model leaves "pending" per scan.
+  assert.deepEqual((await health.scanNext()).models.map(({ id, status }) => ({ id, status })), [
+    { id: "model-a", status: "healthy" },
+    { id: "model-b", status: "pending" }
+  ]);
+  assert.deepEqual((await health.scanNext()).models.map(({ id, status }) => ({ id, status })), [
+    { id: "model-a", status: "healthy" },
+    { id: "model-b", status: "healthy" }
+  ]);
+  assert.deepEqual(calls, ["/v1/models", "/v1/limits", "/v1/limits"]);
 });
 
-test("Kimi-K3 health probe omits the unsupported temperature zero parameter", async () => {
-  let payload;
+test("health probes send no chat completion body upstream", async () => {
+  const calls = [];
   const health = new MirasimModelHealth({ homes: [], relayUrl: "https://relay.example.test", models: ["kimi-k3"] }, {
     pick() { return { home: "/profile-a", token: "mirasim-token" }; }
   }, {
     fetchImpl: async (url, options) => {
+      calls.push({ pathname: url.pathname, method: options.method, body: options.body });
       if (url.pathname === "/v1/models") return json({ data: [] });
-      payload = JSON.parse(options.body);
-      return json({ choices: [] });
+      return json({ models: { "kimi-k3": { available: true } } });
     }
   });
   await health.discover();
-  await health.runOne("kimi-k3");
-  assert.equal(payload.model, "kimi-k3");
-  assert.equal(payload.temperature, undefined);
-  assert.equal(payload.max_tokens, 1);
+  const snapshot = await health.runOne("kimi-k3");
+  assert.deepEqual(calls.map(({ pathname, method }) => ({ pathname, method })), [
+    { pathname: "/v1/models", method: "GET" },
+    { pathname: "/v1/limits", method: "GET" }
+  ]);
+  assert.equal(calls.every(({ body }) => body === undefined), true);
+  assert.equal(snapshot.models[0].status, "healthy");
 });
 
 test("keeps saved probe results while refreshing the model directory", async () => {

@@ -86,7 +86,9 @@ h2 { font-size: 16px; line-height: 1.4; font-weight: 650; }
 .icon-button { display: grid; width: 32px; height: 32px; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 22px; line-height: 1; }
 .icon-button:hover { color: var(--ink); background: #f5f5f5; }
 
-.notice { margin: -8px 0 18px; padding: 10px 12px; border: 1px solid #ffccc7; border-radius: 6px; color: var(--red); background: var(--red-soft); font-size: 13px; }
+.notice { position: fixed; z-index: 20; top: 20px; right: 20px; max-width: min(360px, calc(100vw - 40px)); padding: 11px 14px; border: 1px solid #ffccc7; border-radius: 6px; color: var(--red); background: var(--red-soft); box-shadow: 0 10px 24px rgb(15 23 42 / 14%); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; cursor: pointer; animation: notice-in 160ms ease-out; }
+.notice[data-state="success"] { border-color: #9bd6b8; color: var(--green); background: var(--green-soft); }
+@keyframes notice-in { from { transform: translateY(-8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 .panel, .pool-section, .empty-state { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: var(--shadow); }
 .panel { min-height: 218px; padding: 20px; }
 .panel-heading { align-items: flex-start; }
@@ -147,7 +149,7 @@ input:focus, select:focus { border-color: var(--blue); outline: 2px solid rgba(2
 .invite-code, .api-key-value { display: block; min-width: 0; overflow-x: auto; padding: 8px 10px; border: 1px dashed #91caff; border-radius: 5px; color: #0958d9; background: #f0f7ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
 .invite-code { flex: 1; overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .redeem-form, .api-key-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 25px; }
-.redeem-form { margin-top: 25px; }
+.redeem-form { grid-template-columns: minmax(0, 1fr) auto auto; margin-top: 25px; }
 #redeem-status[data-state="pending"] { color: var(--orange); }
 #redeem-status[data-state="success"] { color: var(--green); }
 #redeem-status[data-state="error"] { color: var(--red); }
@@ -169,6 +171,9 @@ input:focus, select:focus { border-color: var(--blue); outline: 2px solid rgba(2
 .pool-filters, .pool-pagination { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .pool-filters input { width: min(280px, 42vw); }
 .pool-filters select { min-width: 128px; }
+.account-priority { min-width: 124px; height: 30px; padding: 0 24px 0 9px; font-size: 12px; }
+.priority-cell { display: inline-flex; flex-direction: column; align-items: flex-start; }
+.priority-cell .account-sub { margin-top: 4px; }
 .pool-pagination { margin-left: auto; }
 .pool-pagination .section-hint { white-space: nowrap; }
 .health-actions { display: flex; align-items: center; gap: 12px; }
@@ -182,7 +187,17 @@ input:focus, select:focus { border-color: var(--blue); outline: 2px solid rgba(2
 .model-health-message { min-width: 260px; max-width: 520px; color: var(--muted); overflow-wrap: anywhere; }
 .section-heading { align-items: center; padding: 20px; }
 .section-hint { white-space: nowrap; }
-.table-wrap { overflow-x: auto; }
+/* position: relative keeps the .sr-only labels inside the scroller: without a containing block
+   here they escape the overflow and stretch the page itself sideways. */
+.table-wrap { position: relative; overflow-x: auto; }
+.pool-table { min-width: 1120px; }
+.pool-table th, .pool-table td { padding: 12px 12px; white-space: nowrap; }
+.pool-table .account-name, .pool-table .account-sub { max-width: 230px; overflow: hidden; text-overflow: ellipsis; }
+.pool-table .account-actions { flex-wrap: nowrap; }
+.usage-log-table { min-width: 980px; }
+.usage-log-table th, .usage-log-table td { padding: 12px 12px; white-space: nowrap; }
+.usage-log-table td:nth-child(2) { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.usage-log-table .token-cell { text-align: right; font-variant-numeric: tabular-nums; }
 table { width: 100%; min-width: 680px; border-collapse: collapse; }
 th, td { padding: 13px 20px; border-top: 1px solid #f0f0f0; text-align: left; vertical-align: middle; }
 th { color: var(--muted); background: var(--surface-soft); font-size: 11px; font-weight: 650; letter-spacing: 0.04em; }
@@ -245,6 +260,7 @@ td { font-size: 13px; }
 }
 
 @media (max-width: 700px) {
+  .notice { top: 12px; right: 12px; left: 12px; max-width: none; }
   .app-layout { display: block; }
   .sider { position: static; display: grid; height: auto; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; border-right: 0; border-bottom: 1px solid var(--line); }
   .brand { min-height: 60px; padding: 0 16px; }
@@ -291,3 +307,7 @@ td { font-size: 13px; }
   .modal { align-items: end; padding: 0; }
   .modal-content { width: 100%; padding: 22px 16px; border-radius: 8px 8px 0 0; }
 }
+.quota-windows { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.quota-windows li { display: grid; grid-template-columns: 90px 1fr; gap: 8px; align-items: baseline; }
+.quota-windows small { grid-column: 2; color: var(--muted); font-size: 11px; }
+.account-transfer-actions { flex-wrap: wrap; justify-content: flex-end; }

@@ -21,6 +21,7 @@
           <button id="nav-api-keys" class="nav-item" type="button"><span class="nav-icon nav-icon-key" aria-hidden="true"></span>API 密钥</button>
           <button id="nav-account-pool" class="nav-item" type="button"><span class="nav-icon nav-icon-users" aria-hidden="true"></span>账号池</button>
           <button id="nav-model-health" class="nav-item" type="button"><span class="nav-icon nav-icon-heartbeat" aria-hidden="true"></span>模型健康</button>
+          <button id="nav-usage-log" class="nav-item" type="button"><span class="nav-icon nav-icon-activity" aria-hidden="true"></span>使用明细</button>
         </nav>
 
         <div class="sider-footer">
@@ -44,7 +45,7 @@
         </header>
 
         <main class="shell">
-          <div id="notice" class="notice" role="status" hidden></div>
+          <div id="notice" class="notice" role="status" aria-live="polite" title="点击关闭" hidden></div>
 
           <section id="overview-view" class="view-panel">
             <div class="page-heading">
@@ -63,8 +64,8 @@
               <article class="overview-stat tone-blue"><span>累计请求</span><strong id="overview-request-count">0</strong><small>本进程已记录</small></article>
               <article class="overview-stat tone-green"><span>输入 Token</span><strong id="overview-input-tokens">0</strong><small>官方记录汇总</small></article>
               <article class="overview-stat tone-orange"><span>输出 Token</span><strong id="overview-output-tokens">0</strong><small>官方记录汇总</small></article>
-              <article class="overview-stat tone-purple"><span>缓存读取</span><strong id="overview-cache-read-tokens">0</strong><small>Cache read tokens</small></article>
-              <article class="overview-stat tone-cyan"><span>缓存写入</span><strong id="overview-cache-write-tokens">0</strong><small>Cache write tokens</small></article>
+              <article class="overview-stat tone-purple"><span>缓存读取</span><strong id="overview-cache-read-tokens">0</strong><small>命中缓存的输入</small></article>
+              <article class="overview-stat tone-cyan"><span>缓存写入</span><strong id="overview-cache-write-tokens">0</strong><small>新建缓存的输入</small></article>
             </div>
 
           </section>
@@ -103,17 +104,19 @@
                     <div><p class="eyebrow">REFERRAL CODE</p><h2>我的邀请码</h2></div>
                     <button id="create-code" class="button button-secondary" type="button">生成</button>
                   </div>
-                  <div class="code-row"><output id="invite-code" class="invite-code">未生成</output><button id="copy-code" class="button button-secondary" type="button" disabled>复制</button></div>
+                  <div class="code-row"><output id="invite-code" class="invite-code">尚未生成</output><button id="copy-code" class="button button-secondary" type="button" disabled>复制</button></div>
                   <p id="invite-copy" class="panel-note"></p>
                 </section>
 
                 <section class="panel redeem-panel">
-                  <div class="panel-heading compact"><div><p class="eyebrow">REDEEM</p><h2>兑换邀请码</h2></div></div>
+                  <div class="panel-heading compact"><div><p class="eyebrow">REDEEM</p><h2>兑换邀请码 / 授权码</h2></div></div>
                   <form id="redeem-form" class="redeem-form">
-                    <label class="sr-only" for="redeem-code">邀请码</label>
-                    <input id="redeem-code" name="code" autocomplete="off" maxlength="128" placeholder="输入邀请码" required>
+                    <label class="sr-only" for="redeem-code">邀请码或授权码</label>
+                    <input id="redeem-code" name="code" autocomplete="off" maxlength="128" placeholder="输入邀请码或 MLIC 授权码" required>
                     <button class="button button-primary" type="submit">兑换</button>
+                    <button id="preview-code" class="button button-secondary" type="button">查看档位</button>
                   </form>
+                  <p class="panel-note">授权码支持同档续期、高档立即升档；低于当前档位的授权码会被官方挡下，且不会被消耗。</p>
                   <p id="redeem-status" class="panel-note">兑换成功后将刷新此账号的官方登录态。</p>
                 </section>
               </div>
@@ -127,7 +130,7 @@
             <section class="panel api-key-panel" aria-labelledby="api-key-title">
               <div class="panel-heading compact"><div><p class="eyebrow">API KEY MANAGEMENT</p><h2 id="api-key-title">OpenAI API Key</h2></div></div>
               <form id="api-key-form" class="api-key-form"><label class="sr-only" for="api-key-name">密钥名称</label><input id="api-key-name" name="name" maxlength="64" placeholder="密钥名称，例如本机开发"><button class="button button-primary" type="submit">生成密钥</button></form>
-              <div id="api-key-reveal" class="api-key-reveal" hidden><code id="api-key-value" class="api-key-value"></code><button id="copy-api-key" class="button button-secondary" type="button">复制</button></div>
+              <div id="api-key-reveal" class="api-key-reveal" hidden><code id="api-key-value" class="api-key-value"></code><button id="copy-api-key" class="button button-secondary" type="button" aria-label="复制完整 API 密钥">复制完整密钥</button></div>
               <p class="panel-note">新密钥仅在生成时显示一次。所有 OpenAI 兼容请求均须使用它。</p>
               <div class="table-wrap api-key-table-wrap"><table class="api-key-table"><thead><tr><th>名称</th><th>密钥前缀</th><th>创建时间</th><th>最近使用</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="api-key-list"></tbody></table></div>
             </section>
@@ -136,7 +139,7 @@
           <section id="account-pool-view" class="view-panel" hidden>
             <div class="page-heading">
               <div><p class="eyebrow">ROUND ROBIN POOL</p><h1>账号池</h1><p class="page-description">查看每个账号的账户类型、邀请名额和中转健康度。</p></div>
-              <div class="health-actions"><span class="section-hint">按可用账号轮询</span><button id="restore-accounts" class="button button-secondary" type="button">恢复本地账户</button></div>
+              <div class="health-actions account-transfer-actions"><span class="section-hint">按优先级轮询，同级内轮流</span><input id="import-accounts-file" type="file" accept="application/json,.json" hidden><button id="import-accounts" class="button button-secondary" type="button">导入账号</button><button id="export-accounts" class="button button-secondary" type="button">导出账号</button><button id="restore-accounts" class="button button-secondary" type="button">恢复本地账户</button></div>
             </div>
             <section class="pool-section">
               <div class="pool-toolbar">
@@ -159,7 +162,7 @@
                   <button id="pool-page-next" class="button button-secondary" type="button" aria-label="下一页">下一页</button>
                 </div>
               </div>
-              <div class="table-wrap"><table><thead><tr><th>账号</th><th>账户类型</th><th>邀请活动</th><th>中转状态</th><th>最近响应</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="pool-body"></tbody></table></div>
+              <div class="table-wrap"><table class="pool-table"><thead><tr><th>账号</th><th>账户类型</th><th>邀请活动</th><th>额度</th><th>轮询优先级</th><th>中转状态</th><th>最近响应</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="pool-body"></tbody></table></div>
             </section>
           </section>
 
@@ -173,6 +176,24 @@
               <div class="table-wrap"><table class="model-health-table"><thead><tr><th>模型</th><th>状态</th><th>响应耗时</th><th>HTTP</th><th>检测时间</th><th>结果</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="model-health-body"></tbody></table></div>
             </section>
           </section>
+
+          <section id="usage-log-view" class="view-panel" hidden>
+            <div class="page-heading">
+              <div><p class="eyebrow">REQUEST LOG</p><h1>使用明细</h1><p class="page-description">请求完成后显示账号、模型、token 用量和响应耗时（保留最近 500 条，重启后清空）。</p></div>
+              <div class="health-actions"><span id="usage-log-updated" class="updated-at">正在读取使用明细</span></div>
+            </div>
+            <section class="pool-section">
+              <div class="pool-toolbar">
+                <div class="pool-filters"><span class="section-hint">按时间倒序排列</span></div>
+                <div class="pool-pagination" aria-label="使用明细分页">
+                  <span id="usage-log-page-summary" class="section-hint"></span>
+                  <button id="usage-log-page-prev" class="button button-secondary" type="button" aria-label="上一页">上一页</button>
+                  <button id="usage-log-page-next" class="button button-secondary" type="button" aria-label="下一页">下一页</button>
+                </div>
+              </div>
+              <div class="table-wrap"><table class="usage-log-table"><thead><tr><th>完成时间</th><th>账号</th><th>模型</th><th>协议</th><th>思考等级</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>首字</th><th>总耗时</th><th>状态</th></tr></thead><tbody id="usage-log-body"></tbody></table></div>
+            </section>
+          </section>
         </main>
       </div>
     </div>
@@ -183,14 +204,13 @@
         <div class="modal-heading"><div><p class="eyebrow">MIRASIM AUTH</p><h2 id="mirasim-login-title">登录 Mirasim 账号</h2></div><button id="mirasim-login-close" class="icon-button" type="button" aria-label="关闭登录窗口">×</button></div>
         <p id="mirasim-login-status" class="modal-status">输入邮箱后发送验证码。</p>
         <form id="mirasim-code-form" class="mirasim-login-form">
-          <label for="mirasim-account-select">账号槽位</label><select id="mirasim-account-select"></select>
           <label for="mirasim-email">邮箱</label><input id="mirasim-email" name="email" type="email" autocomplete="email" placeholder="name@example.com" required>
           <button class="button button-secondary" type="submit">发送验证码</button>
         </form>
         <form id="mirasim-verify-form" class="mirasim-verify-form"><label for="mirasim-verify-code">验证码</label><div class="verify-row"><input id="mirasim-verify-code" name="code" autocomplete="one-time-code" maxlength="128" placeholder="输入邮箱验证码" required><button class="button button-primary" type="submit">登录账号</button></div></form>
         <form id="moemail-register-form" class="moemail-register-form">
           <label for="moemail-invite-code">兑换码</label>
-          <input id="moemail-invite-code" name="inviteCode" autocomplete="off" maxlength="128" placeholder="可选">
+          <input id="moemail-invite-code" name="inviteCode" autocomplete="off" maxlength="128" placeholder="可选，邀请码或 MLIC 授权码">
           <label for="moemail-count">数量</label>
           <input id="moemail-count" name="count" type="number" min="1" max="5" step="1" value="1" required>
           <button class="button button-primary" type="submit">MoeMail 注册</button>
@@ -199,10 +219,11 @@
           <label for="moemail-url">服务地址</label>
           <input id="moemail-url" name="url" type="url" autocomplete="url" placeholder="https://mail.example.com" required>
           <label for="moemail-domain">邮箱域名</label>
-          <input id="moemail-domain" name="domain" autocomplete="off" placeholder="mail.example.com" required>
+          <input id="moemail-domain" name="domain" autocomplete="off" placeholder="mail.example.com，可用逗号分隔" required>
           <label for="moemail-api-key">API Key</label>
           <input id="moemail-api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="首次配置必填">
           <button class="button button-secondary" type="submit">保存 MoeMail 配置</button>
+          <button id="moemail-domains" class="button button-secondary" type="button">自动获取域名</button>
           <span id="moemail-config-status" class="config-status"></span>
         </form>
       </section>

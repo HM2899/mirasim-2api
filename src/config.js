@@ -5,14 +5,18 @@ import { randomBytes } from "node:crypto";
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 45_000;
 const DEFAULT_MODEL_LIST_TIMEOUT_MS = 10_000;
-const DEFAULT_MODEL_HEALTH_INTERVAL_MS = 60_000;
+const DEFAULT_MODEL_HEALTH_INTERVAL_MS = 1_800_000;
 const DEFAULT_MODEL_HEALTH_TIMEOUT_MS = 12_000;
 const DEFAULT_COOLDOWN_MS = 30_000;
 const DEFAULT_MOEMAIL_EXPIRY_MS = 3_600_000;
 const DEFAULT_MOEMAIL_CODE_TIMEOUT_MS = 120_000;
 const DEFAULT_MOEMAIL_POLL_MS = 2_500;
-// Matches the login service compiled into the official Mirasim 0.0.147 desktop app.
-const DEFAULT_LOGIN_URL = "https://admin.test.mirofish.ai";
+// Matches the login service compiled into the official Mirasim desktop app.
+const DEFAULT_LOGIN_URL = "https://auth.mirasim.ai";
+const DEFAULT_CLIENT_VERSION = "0.0.239";
+
+const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high"]);
+const DEFAULT_REASONING_EFFORT = "medium";
 
 export function loadConfig(env = process.env) {
   const relayUrl = requiredUrl(env.MIRASIM_RELAY_URL || "https://mirasim-relay.mirofish.ai", "MIRASIM_RELAY_URL");
@@ -48,6 +52,7 @@ export function loadConfig(env = process.env) {
     },
     relayUrl,
     loginUrl,
+    clientVersion: env.MIRASIM_CLIENT_VERSION?.trim() || DEFAULT_CLIENT_VERSION,
     webAuth: {
       username: env.WEB_AUTH_USERNAME?.trim() || "admin",
       password: configuredWebPassword || randomBytes(18).toString("base64url"),
@@ -60,8 +65,20 @@ export function loadConfig(env = process.env) {
     modelListTimeoutMs,
     modelHealthIntervalMs: parsePositiveInt(env.MIRASIM_MODEL_HEALTH_INTERVAL_MS, DEFAULT_MODEL_HEALTH_INTERVAL_MS, "MIRASIM_MODEL_HEALTH_INTERVAL_MS"),
     modelHealthTimeoutMs: parsePositiveInt(env.MIRASIM_MODEL_HEALTH_TIMEOUT_MS, DEFAULT_MODEL_HEALTH_TIMEOUT_MS, "MIRASIM_MODEL_HEALTH_TIMEOUT_MS"),
-    cooldownMs: parsePositiveInt(env.MIRASIM_COOLDOWN_MS, DEFAULT_COOLDOWN_MS, "MIRASIM_COOLDOWN_MS")
+    cooldownMs: parsePositiveInt(env.MIRASIM_COOLDOWN_MS, DEFAULT_COOLDOWN_MS, "MIRASIM_COOLDOWN_MS"),
+    defaultReasoningEffort: parseReasoningEffort(env.MIRASIM_DEFAULT_REASONING_EFFORT, DEFAULT_REASONING_EFFORT)
   };
+}
+
+// Most OpenAI-protocol clients never send reasoning_effort, so without a default the upstream
+// model answers with thinking off. Set MIRASIM_DEFAULT_REASONING_EFFORT=none to opt back out.
+function parseReasoningEffort(value, fallback) {
+  const effort = value === undefined ? "" : String(value).trim().toLowerCase();
+  if (!effort) return fallback;
+  if (!REASONING_EFFORTS.has(effort)) {
+    throw new Error(`MIRASIM_DEFAULT_REASONING_EFFORT must be one of ${[...REASONING_EFFORTS].join(", ")}`);
+  }
+  return effort;
 }
 
 function resolveFile(value, fallback) {

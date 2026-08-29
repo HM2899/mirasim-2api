@@ -33,6 +33,25 @@ test("creates a MoeMail inbox and extracts a labeled verification code", async (
   assert.match(payload.name, /^mirasim-[0-9a-f]{12}$/);
 });
 
+test("rotates configured domains and discovers provider domains", async () => {
+  const generated = [];
+  const client = new MoeMailClient({ url: "https://mail.example.test", apiKey: "mail-key", domains: ["one.example.test", "two.example.test"] }, {
+    fetchImpl: async (url, options) => {
+      if (url.pathname === "/api/domains") return json({ domains: [{ domain: "one.example.test" }, { name: "two.example.test" }] });
+      if (url.pathname === "/api/emails/generate") {
+        generated.push(JSON.parse(options.body).domain);
+        return json({ id: `mail-${generated.length}`, email: `new${generated.length}@example.test` });
+      }
+      throw new Error(`Unexpected path ${url.pathname}`);
+    }
+  });
+  await client.createMailbox();
+  await client.createMailbox();
+  await client.createMailbox();
+  assert.deepEqual(generated, ["one.example.test", "two.example.test", "one.example.test"]);
+  assert.deepEqual(await client.listDomains(), ["one.example.test", "two.example.test"]);
+});
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }

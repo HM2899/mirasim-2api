@@ -28,3 +28,18 @@ test("stores only API Key hashes and supports authentication and revocation", ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("stores a recoverable API Key only as console-password encrypted ciphertext", () => {
+  const root = mkdtempSync(join(tmpdir(), "mirasim-api-key-history-"));
+  try {
+    const file = join(root, "keys.sqlite");
+    const store = new OpenAIKeyStore(file, { secret: "console-password" });
+    const created = store.create("Historical client");
+    assert.equal(store.list()[0].copyable, true);
+    assert.equal(store.reveal(created.record.id), created.key);
+    assert.equal(new OpenAIKeyStore(file, { secret: "wrong-password" }).reveal(created.record.id), null);
+    assert.equal(readFileSync(file, "utf8").includes(created.key), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -1,4 +1,4 @@
-const DEFAULT_SCAN_INTERVAL_MS = 60_000;
+const DEFAULT_SCAN_INTERVAL_MS = 1_800_000;
 const DEFAULT_TIMEOUT_MS = 12_000;
 
 export class MirasimModelHealth {
@@ -164,11 +164,10 @@ export class MirasimModelHealth {
     const profile = this.pool.pick();
     if (!profile) return result(id, "unavailable", checkedAt, this.now() - startedAt, 0, "没有可用的已登录账号。");
     try {
-      const body = JSON.stringify(probePayload(id));
-      const response = await this.#request("/v1/chat/completions", {
-        method: "POST",
-        headers: await this.#headers(profile, "POST", "/v1/chat/completions", body),
-        body
+      const path = "/v1/limits";
+      const response = await this.#request(path, {
+        method: "GET",
+        headers: await this.#headers(profile, "GET", path)
       });
       const latencyMs = this.now() - startedAt;
       if (response.ok) return result(id, "healthy", checkedAt, latencyMs, response.status, "可正常响应。");
@@ -191,7 +190,7 @@ export class MirasimModelHealth {
 
   async #headers(profile, method, path, body = "") {
     if (this.relaySessions) return this.relaySessions.headersFor(profile, { method, path, body });
-    return { Accept: "application/json", "Content-Type": "application/json", "x-mirasim-client": "0.0.147", Authorization: `Bearer ${profile.token}` };
+    return { Accept: "application/json", "Content-Type": "application/json", "x-mirasim-client": this.config.clientVersion || "0.0.239", Authorization: `Bearer ${profile.token}` };
   }
 }
 
@@ -202,12 +201,6 @@ function errorMessage(data, status) { const message = data?.error?.message || da
 function positiveNumber(value, fallback) { return Number.isInteger(value) && value > 0 ? value : fallback; }
 function callableModelId(value) { return typeof value === "string" && value.trim() !== "" && value.trim() !== "*"; }
 function requestError(statusCode, message) { const error = new Error(message); error.statusCode = statusCode; return error; }
-function probePayload(id) {
-  const payload = { model: id, messages: [{ role: "user", content: "Reply exactly OK." }], max_tokens: 1, stream: false };
-  // Kimi-K3 rejects temperature: 0 while accepting the same OpenAI chat shape without it.
-  if (id !== "kimi-k3") payload.temperature = 0;
-  return payload;
-}
 function savedModels(models) {
   if (!Array.isArray(models)) return [];
   return models.flatMap((model) => {

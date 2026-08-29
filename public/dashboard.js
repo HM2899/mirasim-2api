@@ -1,5 +1,10 @@
 const DEFAULT_REDEEM_STATUS = "兑换成功后将刷新此账号的官方登录态。";
 const POOL_PAGE_SIZE = 10;
+const USAGE_LOG_PAGE_SIZE = 20;
+// 时间/账号/模型/协议/思考等级/输入/输出/缓存读/缓存写/首字/总耗时/状态
+const USAGE_LOG_COLUMNS = 12;
+// Mirasim's own plan names, as shown by the desktop client.
+const PLAN_LABELS = { none: "FREE", free: "FREE", basic: "MAX 2X", plus: "MAX 10X", max: "MAX 40X", enterprise: "企业版", internal: "内部账号" };
 const state = {
   data: null,
   apiKeys: [],
@@ -13,6 +18,8 @@ const state = {
   poolQuery: "",
   poolCategory: "all",
   poolPage: 1,
+  usageLog: [],
+  usageLogPage: 1,
   loading: false,
   activeView: "overview"
 };
@@ -34,6 +41,13 @@ const elements = {
   apiKeysView: document.querySelector("#api-keys-view"),
   accountPoolView: document.querySelector("#account-pool-view"),
   modelHealthView: document.querySelector("#model-health-view"),
+  usageLogView: document.querySelector("#usage-log-view"),
+  navUsageLog: document.querySelector("#nav-usage-log"),
+  usageLogUpdated: document.querySelector("#usage-log-updated"),
+  usageLogBody: document.querySelector("#usage-log-body"),
+  usageLogPageSummary: document.querySelector("#usage-log-page-summary"),
+  usageLogPagePrev: document.querySelector("#usage-log-page-prev"),
+  usageLogPageNext: document.querySelector("#usage-log-page-next"),
   overviewAccountCount: document.querySelector("#overview-account-count"),
   overviewSignedInCount: document.querySelector("#overview-signed-in-count"),
   overviewAvailableCount: document.querySelector("#overview-available-count"),
@@ -47,7 +61,6 @@ const elements = {
   mirasimLoginModal: document.querySelector("#mirasim-login-modal"),
   mirasimLoginClose: document.querySelector("#mirasim-login-close"),
   mirasimLoginStatus: document.querySelector("#mirasim-login-status"),
-  mirasimAccount: document.querySelector("#mirasim-account-select"),
   mirasimEmail: document.querySelector("#mirasim-email"),
   mirasimCodeForm: document.querySelector("#mirasim-code-form"),
   mirasimVerifyForm: document.querySelector("#mirasim-verify-form"),
@@ -60,6 +73,7 @@ const elements = {
   moemailDomain: document.querySelector("#moemail-domain"),
   moemailApiKey: document.querySelector("#moemail-api-key"),
   moemailConfigStatus: document.querySelector("#moemail-config-status"),
+  moemailDomains: document.querySelector("#moemail-domains"),
   apiKeyForm: document.querySelector("#api-key-form"),
   apiKeyName: document.querySelector("#api-key-name"),
   apiKeyReveal: document.querySelector("#api-key-reveal"),
@@ -80,6 +94,7 @@ const elements = {
   copyCode: document.querySelector("#copy-code"),
   redeemForm: document.querySelector("#redeem-form"),
   redeemCode: document.querySelector("#redeem-code"),
+  previewCode: document.querySelector("#preview-code"),
   redeemStatus: document.querySelector("#redeem-status"),
   poolBody: document.querySelector("#pool-body"),
   poolSearch: document.querySelector("#pool-search"),
@@ -88,6 +103,9 @@ const elements = {
   poolPagePrev: document.querySelector("#pool-page-prev"),
   poolPageNext: document.querySelector("#pool-page-next"),
   restoreAccounts: document.querySelector("#restore-accounts"),
+  importAccounts: document.querySelector("#import-accounts"),
+  importAccountsFile: document.querySelector("#import-accounts-file"),
+  exportAccounts: document.querySelector("#export-accounts"),
   modelHealthUpdated: document.querySelector("#model-health-updated"),
   modelHealthDiscover: document.querySelector("#model-health-discover"),
   modelHealthSummary: document.querySelector("#model-health-summary"),
@@ -101,6 +119,7 @@ elements.navActivity.addEventListener("click", () => setView("activity"));
 elements.navApiKeys.addEventListener("click", () => setView("apiKeys"));
 elements.navAccountPool.addEventListener("click", () => setView("accountPool"));
 elements.navModelHealth.addEventListener("click", () => setView("modelHealth"));
+elements.navUsageLog.addEventListener("click", () => setView("usageLog"));
 elements.modelHealthDiscover.addEventListener("click", discoverModels);
 elements.mirasimLoginOpen.addEventListener("click", openMirasimLogin);
 elements.mirasimLoginOpenHeader.addEventListener("click", openMirasimLogin);
@@ -113,18 +132,24 @@ elements.select.addEventListener("change", () => {
   render();
 });
 elements.createCode.addEventListener("click", createReferral);
+elements.notice.addEventListener("click", hideNotice);
 elements.copyCode.addEventListener("click", copyInviteCode);
 elements.redeemForm.addEventListener("submit", redeemInvite);
-elements.mirasimAccount.addEventListener("change", () => { state.loginKey = elements.mirasimAccount.value; });
+elements.previewCode.addEventListener("click", previewRedeemCode);
 elements.mirasimCodeForm.addEventListener("submit", requestMirasimCode);
 elements.mirasimVerifyForm.addEventListener("submit", verifyMirasimLogin);
 elements.moemailRegisterForm.addEventListener("submit", registerWithMoeMail);
 elements.moemailConfigForm.addEventListener("submit", saveMoeMailConfig);
+elements.moemailDomains.addEventListener("click", discoverMoeMailDomains);
 elements.apiKeyForm.addEventListener("submit", createApiKey);
 elements.copyApiKey.addEventListener("click", copyApiKey);
 elements.apiKeyList.addEventListener("click", revokeApiKey);
+elements.apiKeyList.addEventListener("click", copyHistoricalApiKey);
 elements.poolBody.addEventListener("click", deleteAccount);
 elements.poolBody.addEventListener("click", renewAccount);
+elements.poolBody.addEventListener("click", cooldownAccount);
+elements.poolBody.addEventListener("click", recoverAccount);
+elements.poolBody.addEventListener("change", changeAccountPriority);
 elements.poolSearch.addEventListener("input", () => {
   state.poolQuery = elements.poolSearch.value.trim();
   state.poolPage = 1;
@@ -137,13 +162,19 @@ elements.poolCategory.addEventListener("change", () => {
 });
 elements.poolPagePrev.addEventListener("click", () => changePoolPage(-1));
 elements.poolPageNext.addEventListener("click", () => changePoolPage(1));
+elements.usageLogPagePrev.addEventListener("click", () => changeUsageLogPage(-1));
+elements.usageLogPageNext.addEventListener("click", () => changeUsageLogPage(1));
 elements.restoreAccounts.addEventListener("click", restoreAccounts);
+elements.importAccounts.addEventListener("click", () => elements.importAccountsFile.click());
+elements.importAccountsFile.addEventListener("change", importAccounts);
+elements.exportAccounts.addEventListener("click", exportAccounts);
 elements.modelHealthBody.addEventListener("click", checkModel);
 
 loadDashboard();
 setInterval(loadDashboard, 60_000);
 setInterval(() => {
   if (state.activeView === "modelHealth") void loadModelHealth();
+  if (state.activeView === "usageLog") void loadUsageLog();
 }, 5_000);
 
 async function loadDashboard() {
@@ -161,7 +192,8 @@ async function loadDashboard() {
       state.selectedKey = signedIn[0]?.key || null;
     }
     if (!state.data.accounts.some((account) => account.key === state.loginKey)) {
-      state.loginKey = state.data.accounts[0]?.key || "new";
+  // Login always defaults to a fresh pool slot; existing accounts remain selectable explicitly.
+  state.loginKey = "new";
     }
     render();
   } catch (error) {
@@ -170,6 +202,84 @@ async function loadDashboard() {
     state.loading = false;
     elements.refresh.disabled = false;
   }
+}
+
+async function loadUsageLog() {
+  try {
+    const result = await request("/api/usage-log");
+    state.usageLog = result.entries || [];
+    renderUsageLog();
+  } catch {
+    // Keep the last rendered result while a background poll is unavailable.
+  }
+}
+
+function renderUsageLog() {
+  const entries = state.usageLog || [];
+  elements.usageLogUpdated.textContent = `更新于 ${formatTime(new Date().toISOString())} · 共 ${entries.length} 条`;
+  const pageCount = Math.max(1, Math.ceil(entries.length / USAGE_LOG_PAGE_SIZE));
+  state.usageLogPage = Math.min(Math.max(state.usageLogPage, 1), pageCount);
+  const offset = (state.usageLogPage - 1) * USAGE_LOG_PAGE_SIZE;
+  const pageEntries = entries.slice(offset, offset + USAGE_LOG_PAGE_SIZE);
+  elements.usageLogPageSummary.textContent = entries.length === 0
+    ? "暂无记录"
+    : `${offset + 1}-${offset + pageEntries.length} / ${entries.length} 条`;
+  elements.usageLogPagePrev.disabled = state.usageLogPage <= 1;
+  elements.usageLogPageNext.disabled = state.usageLogPage >= pageCount;
+  if (pageEntries.length === 0) {
+    elements.usageLogBody.innerHTML = `<tr><td colspan="${USAGE_LOG_COLUMNS}" class="empty-table">还没有中转请求记录。</td></tr>`;
+    return;
+  }
+  elements.usageLogBody.innerHTML = pageEntries.map((entry) => {
+    const status = `<span class="table-status ${entry.status >= 200 && entry.status < 300 ? "good" : "bad"}">${entry.status ? `HTTP ${entry.status}` : "失败"}</span>`;
+    return `<tr>
+      <td>${escapeHtml(formatTime(entry.completedAt || entry.at))}</td>
+      <td>${escapeHtml(usageAccountLabel(entry.account))}</td>
+      <td><code>${escapeHtml(entry.model || "-")}</code>${entry.stream ? `<span class="account-sub">流式</span>` : ""}</td>
+      <td>${escapeHtml(entry.protocol || "-")}</td>
+      <td>${escapeHtml(reasoningLabel(entry.reasoningEffort))}</td>
+      <td class="token-cell">${tokenCell(entry.inputTokens)}</td>
+      <td class="token-cell">${tokenCell(entry.outputTokens)}</td>
+      <td class="token-cell">${tokenCell(entry.cacheReadTokens)}</td>
+      <td class="token-cell">${tokenCell(entry.cacheWriteTokens)}</td>
+      <td>${latencyCell(entry.ttfbMs)}</td>
+      <td>${latencyCell(entry.durationMs)}</td>
+      <td>${status}</td>
+    </tr>`;
+  }).join("");
+}
+
+function changeUsageLogPage(direction) {
+  const pageCount = Math.max(1, Math.ceil((state.usageLog || []).length / USAGE_LOG_PAGE_SIZE));
+  state.usageLogPage = Math.min(pageCount, Math.max(1, state.usageLogPage + direction));
+  renderUsageLog();
+}
+
+// The log only keeps the account id the relay authenticated with; the mailbox is what the
+// operator actually recognises, so it is resolved from the pool that is already loaded.
+function usageAccountLabel(account) {
+  if (!account) return "-";
+  const match = (state.data?.accounts || []).find((item) => item.id === account || item.key === account || item.home === account);
+  return match?.identity?.email || match?.identity?.name || match?.key || account;
+}
+
+function tokenCell(value) {
+  return value === null || value === undefined ? "-" : escapeHtml(formatNumber(value));
+}
+
+function latencyCell(value) {
+  if (value === null || value === undefined) return "-";
+  return value >= 1000 ? `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)} 秒` : `${value} 毫秒`;
+}
+
+function reasoningLabel(value) {
+  if (!value) return "默认";
+  if (value === "none") return "关闭";
+  if (value === "low") return "低";
+  if (value === "medium") return "中";
+  if (value === "high") return "高";
+  if (value.startsWith("budget:")) return `${value.slice(7)} tokens`;
+  return value;
 }
 
 async function loadModelHealth() {
@@ -188,8 +298,7 @@ function render() {
   elements.relayHost.textContent = data.relay;
   elements.updatedAt.textContent = `更新于 ${formatTime(data.generatedAt)}`;
   elements.console.hidden = signedIn.length === 0;
-  elements.mirasimAccount.innerHTML = `${data.accounts.map((account) => `<option value="${escapeHtml(account.key)}">${escapeHtml(loginAccountLabel(account))}</option>`).join("")}<option value="new">新增账户</option>`;
-  elements.mirasimAccount.value = state.loginKey;
+  state.loginKey = "new";
   renderMoeMailConfig();
   renderApiKeys();
   renderRedeemStatus();
@@ -219,10 +328,12 @@ function setView(view) {
     activity: { nav: elements.navActivity, panel: elements.activityView },
     apiKeys: { nav: elements.navApiKeys, panel: elements.apiKeysView },
     accountPool: { nav: elements.navAccountPool, panel: elements.accountPoolView },
-    modelHealth: { nav: elements.navModelHealth, panel: elements.modelHealthView }
+    modelHealth: { nav: elements.navModelHealth, panel: elements.modelHealthView },
+    usageLog: { nav: elements.navUsageLog, panel: elements.usageLogView }
   };
   if (!views[view]) return;
   state.activeView = view;
+  if (view === "usageLog") void loadUsageLog();
   for (const [name, item] of Object.entries(views)) {
     const active = name === view;
     item.nav.className = `nav-item${active ? " active" : ""}`;
@@ -247,7 +358,7 @@ function renderModelHealth() {
   elements.modelHealthDiscover.textContent = health.discovering ? "读取中" : "刷新模型";
   elements.modelHealthSummary.innerHTML = `<span class="health-count good">可用 ${numeric(totals.healthy)}</span><span class="health-count warning">限流 ${numeric(totals.limited)}</span><span class="health-count bad">不可用 ${numeric(totals.unavailable) + numeric(totals.unauthorized)}</span><span class="health-count neutral">待检测 ${numeric(totals.pending) + numeric(totals.checking)}</span><span class="health-count neutral">已发现 ${models.length}</span>${health.lastError ? `<span class="health-error">${escapeHtml(health.lastError)}</span>` : ""}`;
   if (models.length === 0) {
-    elements.modelHealthBody.innerHTML = `<tr><td colspan="7" class="empty-table">${health.discovering || health.running ? "正在获取上游模型列表..." : "尚未发现可检测的模型。"}</td></tr>`;
+    elements.modelHealthBody.innerHTML = `<tr><td colspan="8" class="empty-table">${health.discovering || health.running ? "正在获取上游模型列表..." : "尚未发现可检测的模型。"}</td></tr>`;
     return;
   }
   elements.modelHealthBody.innerHTML = models.map((model) => {
@@ -273,11 +384,17 @@ function renderOverview(data) {
   elements.overviewAccountCount.textContent = formatNumber(data.accounts.length);
   elements.overviewSignedInCount.textContent = formatNumber(totals.signedIn);
   elements.overviewAvailableCount.textContent = formatNumber(totals.available);
-  elements.overviewRequestCount.textContent = formatNumber(totals.requests);
-  elements.overviewInputTokens.textContent = formatNumber(totals.inputTokens);
-  elements.overviewOutputTokens.textContent = formatNumber(totals.outputTokens);
-  elements.overviewCacheReadTokens.textContent = formatNumber(totals.cacheReadTokens);
-  elements.overviewCacheWriteTokens.textContent = formatNumber(totals.cacheWriteTokens);
+  renderOverviewCounter(elements.overviewRequestCount, totals.requests);
+  renderOverviewCounter(elements.overviewInputTokens, totals.inputTokens);
+  renderOverviewCounter(elements.overviewOutputTokens, totals.outputTokens);
+  renderOverviewCounter(elements.overviewCacheReadTokens, totals.cacheReadTokens);
+  renderOverviewCounter(elements.overviewCacheWriteTokens, totals.cacheWriteTokens);
+}
+
+// A running total is what the card is for; the exact digits are what the tooltip is for.
+function renderOverviewCounter(element, value) {
+  element.textContent = formatCompactNumber(value);
+  element.title = formatNumber(numeric(value));
 }
 
 function renderApiKeys() {
@@ -293,7 +410,7 @@ function renderApiKeys() {
     <td><code>${escapeHtml(key.prefix)}</code></td>
     <td>${escapeHtml(formatTime(key.createdAt))}</td>
     <td>${escapeHtml(key.lastUsedAt ? formatTime(key.lastUsedAt) : "未使用")}</td>
-    <td><button class="button button-secondary key-revoke" type="button" data-key-id="${escapeHtml(key.id)}">吊销</button></td>
+    <td><div class="account-actions">${key.copyable ? `<button class="button button-secondary key-copy" type="button" data-copy-key-id="${escapeHtml(key.id)}">复制</button>` : `<span class="account-sub">不可恢复</span>`}<button class="button button-secondary key-revoke" type="button" data-key-id="${escapeHtml(key.id)}">吊销</button></div></td>
   </tr>`).join("");
 }
 
@@ -308,31 +425,45 @@ function renderAccount(account) {
   elements.accountStatus.className = `status-dot ${account.healthy ? "good" : "warning"}`;
 
   const plan = accountTypeLabel(referral?.currentPlan || account.identity?.accountType) || "普通用户";
-  const nextPlan = accountTypeLabel(referral?.nextPlan) || referral?.nextPlan || (referral ? "暂无下一等级" : "暂无活动信息");
+  // The reward tier is what the invites unlock: the next tier, or the current one once reached.
+  const reward = accountTypeLabel(referral?.rewardPlan) || (referral ? "官方暂未开放奖励档位" : "暂无活动信息");
   elements.membership.innerHTML = `
     <div><span class="plan-label">账户类型</span><strong class="plan-name">${escapeHtml(plan)}</strong></div>
     <div class="plan-divider" aria-hidden="true">→</div>
-    <div class="plan-next"><span class="plan-label">活动目标</span><strong class="plan-name">${escapeHtml(nextPlan)}</strong></div>`;
+    <div class="plan-next"><span class="plan-label">活动目标</span><strong class="plan-name">${escapeHtml(reward)}</strong></div>`;
 
-  const target = referral?.threshold || referral?.maxRedemptions || 0;
+  const threshold = referral?.threshold || 0;
   const redeemed = referral?.redeemed || 0;
-  const percentage = target > 0 ? Math.min(100, Math.round((redeemed / target) * 100)) : 0;
-  elements.redeemed.textContent = target > 0 ? `${redeemed} / ${target}` : String(redeemed);
-  elements.remaining.textContent = referral ? `剩余名额 ${referral.remaining}` : "暂无活动名额";
+  const percentage = threshold > 0 ? Math.min(100, Math.round((redeemed / threshold) * 100)) : 0;
+  elements.redeemed.textContent = threshold > 0 ? `${redeemed} / ${threshold}` : String(redeemed);
+  elements.remaining.textContent = !referral
+    ? "暂无活动名额"
+    : referral.maxRedemptions > 0 ? `邀请码剩余可兑换 ${referral.remaining} 次` : "官方未限制兑换次数";
   elements.progress.style.width = `${percentage}%`;
-  elements.progressCopy.textContent = referral
-    ? (referral.reached ? "当前账号已达到本轮活动目标。" : "活动规则和名额由 Mirasim 官方接口实时返回。")
-    : "官方活动接口当前未返回数据。";
+  elements.progressCopy.textContent = activityCopy(referral, reward);
   setBadge(elements.activityState, referral?.reached ? "已达成" : referral ? "进行中" : "暂无数据", referral?.reached ? "good" : referral ? "warning" : "bad");
 
   const code = referral?.code || "";
   elements.inviteCode.textContent = code || "尚未生成";
-  elements.inviteCopy.textContent = referral?.maxRedemptions
-    ? `本邀请码最多可兑换 ${referral.maxRedemptions} 次。`
-    : referral ? "生成后可复制并分享邀请码。" : "等待官方邀请活动接口恢复。";
+  elements.inviteCopy.textContent = inviteCopy(referral, code);
   elements.copyCode.disabled = !code;
-  elements.createCode.disabled = !referral;
-  elements.redeemForm.querySelector("button").disabled = !referral;
+  elements.createCode.disabled = !account.loggedIn;
+  elements.previewCode.disabled = !account.loggedIn;
+  elements.redeemForm.querySelector("button[type=submit]").disabled = !account.loggedIn;
+}
+
+function inviteCopy(referral, code) {
+  if (!referral) return "官方活动接口暂无数据，仍可尝试生成邀请码。";
+  if (!code) return "尚未生成邀请码，点击生成后即可复制并分享。";
+  if (referral.maxRedemptions > 0) return `本邀请码最多可兑换 ${referral.maxRedemptions} 次，剩余 ${referral.remaining} 次。`;
+  return "官方未限制该邀请码的兑换次数。";
+}
+
+function activityCopy(referral, reward) {
+  if (!referral) return "官方活动接口当前未返回数据。";
+  if (referral.threshold <= 0) return "官方当前未开放邀请奖励档位。";
+  if (referral.reached) return `已达成本轮目标，可兑换${reward}一个月。`;
+  return `再邀请 ${referral.needed ?? Math.max(0, referral.threshold - referral.redeemed)} 位，可兑换${reward}一个月。`;
 }
 
 function renderPool(accounts) {
@@ -349,7 +480,7 @@ function renderPool(accounts) {
   elements.poolPagePrev.disabled = state.poolPage <= 1;
   elements.poolPageNext.disabled = state.poolPage >= pageCount;
   if (pageAccounts.length === 0) {
-    elements.poolBody.innerHTML = `<tr><td colspan="6" class="empty-table">没有符合当前筛选条件的账户。</td></tr>`;
+    elements.poolBody.innerHTML = `<tr><td colspan="8" class="empty-table">没有符合当前筛选条件的账户。</td></tr>`;
     return;
   }
   elements.poolBody.innerHTML = pageAccounts.map((account) => {
@@ -357,15 +488,39 @@ function renderPool(accounts) {
     const identity = account.identity?.name || account.identity?.email || account.id;
     const plan = accountTypeLabel(account.referral?.currentPlan || account.identity?.accountType) || "普通用户";
     const activity = account.referral ? formatActivityQuota(account.referral) : "暂无官方数据";
+    const windows = (account.quota?.windows || []).map((window) => `<li><strong>${escapeHtml(window.name)}</strong><span>${window.resetAt ? `重置 ${escapeHtml(formatCompactTime(typeof window.resetAt === "number" ? window.resetAt * 1000 : window.resetAt))}` : "暂无重置时间"}</span></li>`).join("");
     return `<tr>
-      <td><span class="account-name">${escapeHtml(identity)}</span><span class="account-sub">${escapeHtml(account.id)}</span></td>
+      <td><span class="account-name">${escapeHtml(identity)}</span><span class="account-sub">${escapeHtml(account.identity?.email || account.id)}</span>${account.identity?.subscriptionExpiresAt ? `<span class="account-sub" title="${escapeHtml(formatTime(account.identity.subscriptionExpiresAt))}">订阅至 ${escapeHtml(formatExpiryDate(account.identity.subscriptionExpiresAt))}</span>` : ""}</td>
       <td>${escapeHtml(plan)}</td>
       <td>${escapeHtml(activity)}</td>
-      <td><span class="table-status ${status.className}">${status.label}</span></td>
+      <td>${quotaCell(account, windows)}</td>
+      <td>${priorityCell(account)}</td>
+      <td><span class="table-status ${status.className}">${status.label}</span>${account.quota.availability === "cooling" && account.cooldownUntil ? `<span class="account-sub">冷却至 ${escapeHtml(formatCompactTime(account.cooldownUntil))}</span>` : ""}</td>
       <td>${escapeHtml(formatStatus(account.quota.lastStatus))}</td>
-      <td><div class="account-actions"><button class="button button-secondary account-renew" type="button" data-renew-account="${escapeHtml(account.key)}">续期</button><button class="button button-secondary account-delete" type="button" data-account-key="${escapeHtml(account.key)}">删除</button></div></td>
+      <td><div class="account-actions">${cooldownActionButton(account)}<button class="button button-secondary account-renew" type="button" data-renew-account="${escapeHtml(account.key)}">续期</button><button class="button button-secondary account-delete" type="button" data-account-key="${escapeHtml(account.key)}">删除</button></div></td>
     </tr>`;
   }).join("");
+}
+
+// The rotation serves the highest priority available account first and rotates inside one
+// priority. "自动" leaves the account ordered by its plan, which is what most accounts want.
+const PRIORITY_CHOICES = [["auto", "自动（按档位）"], ["100", "最高 100"], ["75", "较高 75"], ["50", "普通 50"], ["25", "较低 25"], ["0", "最低 0"]];
+
+function priorityCell(account) {
+  const override = account.priorityOverride === null || account.priorityOverride === undefined ? "auto" : String(account.priorityOverride);
+  const known = PRIORITY_CHOICES.some(([value]) => value === override);
+  const choices = known ? PRIORITY_CHOICES : [...PRIORITY_CHOICES, [override, `自定义 ${override}`]];
+  const options = choices.map(([value, label]) => `<option value="${escapeHtml(value)}"${value === override ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  const effective = typeof account.priority === "number" ? account.priority : "-";
+  return `<div class="priority-cell"><select class="account-priority" data-priority-account="${escapeHtml(account.key)}" aria-label="轮询优先级" title="轮询优先级">${options}</select><span class="account-sub">当前 ${escapeHtml(String(effective))}</span></div>`;
+}
+
+function cooldownActionButton(account) {
+  if (!account.loggedIn && !account.disabled) return "";
+  if (account.disabled || account.quota.availability === "cooling") {
+    return `<button class="button button-secondary account-recover" type="button" data-recover-account="${escapeHtml(account.key)}">恢复</button>`;
+  }
+  return `<button class="button button-secondary account-cooldown" type="button" data-cooldown-account="${escapeHtml(account.key)}">冷却</button>`;
 }
 
 function changePoolPage(direction) {
@@ -387,11 +542,12 @@ function matchesPoolFilter(account) {
 
 function poolCategory(account) {
   if (!account.loggedIn) return "logged-out";
-  const plan = accountTypeLabel(account.referral?.currentPlan || account.identity?.accountType) || "普通用户";
-  const normalized = plan.toLocaleLowerCase();
-  if (normalized === "max") return "max";
-  if (normalized === "plus") return "plus";
-  if (plan === "普通用户") return "standard";
+  const raw = account.referral?.currentPlan || account.identity?.accountType || "";
+  const plan = raw.trim().toLowerCase();
+  if (plan === "max" || plan === "enterprise" || plan === "internal") return "max";
+  if (plan === "plus") return "plus";
+  if (plan === "basic") return "member";
+  if (!plan || plan === "none" || plan === "free" || raw.trim() === "普通用户") return "standard";
   return "member";
 }
 
@@ -486,15 +642,34 @@ async function saveMoeMailConfig(event) {
   }
 }
 
+async function discoverMoeMailDomains() {
+  setBusy(elements.moemailDomains, true, "获取中");
+  try {
+    const result = await request("/api/moemail/domains", {
+      method: "POST",
+      body: { url: elements.moemailUrl.value.trim(), apiKey: elements.moemailApiKey.value.trim() }
+    });
+    elements.moemailDomain.value = result.domains.join(", ");
+    elements.moemailConfigStatus.textContent = `已获取 ${result.domains.length} 个域名`;
+    elements.moemailConfigStatus.dataset.state = "ready";
+  } catch (error) {
+    showNotice(error.message || "无法获取 MoeMail 域名。", "error");
+  } finally {
+    setBusy(elements.moemailDomains, false, "自动获取域名");
+  }
+}
+
 async function createReferral() {
   const account = selectedAccount();
   if (!account) return;
   setBusy(elements.createCode, true, "生成中");
   try {
-    await request("/api/referral", { method: "POST", body: { account: account.key } });
+    const result = await request("/api/referral", { method: "POST", body: { account: account.key } });
     await loadDashboard();
+    const code = result.referral?.code || "";
+    showNotice(code ? `邀请码已生成：${code}` : "官方未返回邀请码，请稍后重试。", code ? "success" : "error");
   } catch (error) {
-    showNotice(error.message || "无法生成邀请码。");
+    showNotice(error.message || "无法生成邀请码。", "error");
   } finally {
     setBusy(elements.createCode, false, "生成");
   }
@@ -504,7 +679,7 @@ async function copyInviteCode() {
   const code = elements.inviteCode.textContent;
   if (!code || code === "尚未生成") return;
   try {
-    await navigator.clipboard.writeText(code);
+    await copyText(code);
     showNotice("邀请码已复制。", "success");
   } catch {
     showNotice("浏览器未授予剪贴板权限。", "error");
@@ -516,24 +691,70 @@ async function redeemInvite(event) {
   const account = selectedAccount();
   const code = elements.redeemCode.value.trim();
   if (!account || !code) return;
-  const button = elements.redeemForm.querySelector("button");
-  state.redeemStatus = { text: "正在兑换邀请码...", type: "pending" };
+  const button = elements.redeemForm.querySelector("button[type=submit]");
+  const license = isLicenseCode(code);
+  state.redeemStatus = { text: license ? "正在兑换授权码..." : "正在兑换邀请码...", type: "pending" };
   renderRedeemStatus();
   setBusy(button, true, "兑换中");
   try {
-    await request("/api/invites/redeem", { method: "POST", body: { account: account.key, code } });
+    const result = await request("/api/invites/redeem", { method: "POST", body: { account: account.key, code } });
     elements.redeemCode.value = "";
-    state.redeemStatus = { text: "邀请码已兑换，账号状态已刷新。", type: "success" };
+    state.redeemStatus = { text: redeemedCopy(result), type: "success" };
     renderRedeemStatus();
     showNotice(state.redeemStatus.text, "success");
     await loadDashboard();
   } catch (error) {
-    state.redeemStatus = { text: error.message || "邀请码兑换失败。", type: "error" };
+    state.redeemStatus = { text: error.message || (license ? "授权码兑换失败。" : "邀请码兑换失败。"), type: "error" };
     renderRedeemStatus();
     showNotice(state.redeemStatus.text, "error");
   } finally {
     setBusy(button, false, "兑换");
   }
+}
+
+// MLIC licences report which tier they granted and whether that was an upgrade or a renewal.
+function redeemedCopy(result) {
+  if (result?.kind !== "license") return "邀请码已兑换，账号状态已刷新。";
+  const plan = accountTypeLabel(result.plan) || "该档位";
+  const duration = result.durationDays ? `${result.durationDays} 天` : "";
+  if (result.action === "extend") return `授权码已兑换：${plan}已续期${duration}。`;
+  if (result.action === "upgrade") return `授权码已兑换：已升级为${plan}${duration ? `（${duration}）` : ""}。`;
+  return `授权码已兑换：${plan}${duration ? `（${duration}）` : ""}。`;
+}
+
+async function previewRedeemCode() {
+  const account = selectedAccount();
+  const code = elements.redeemCode.value.trim();
+  if (!account) return;
+  if (!code) {
+    state.redeemStatus = { text: "请输入邀请码或 MLIC 授权码。", type: "error" };
+    renderRedeemStatus();
+    return;
+  }
+  setBusy(elements.previewCode, true, "查询中");
+  try {
+    const result = await request("/api/invites/preview", { method: "POST", body: { account: account.key, code } });
+    state.redeemStatus = { text: previewCopy(result), type: result.verdict === "redeemable" ? "success" : "pending" };
+  } catch (error) {
+    state.redeemStatus = { text: error.message || "无法校验该兑换码。", type: "error" };
+  } finally {
+    renderRedeemStatus();
+    setBusy(elements.previewCode, false, "查看档位");
+  }
+}
+
+function previewCopy(result) {
+  if (!result?.supported) return "邀请码无需预检，直接兑换即可；MLIC 开头的授权码可先查看档位。";
+  const plan = accountTypeLabel(result.plan) || "未知档位";
+  const duration = result.durationDays ? `，有效期 ${result.durationDays} 天` : "";
+  if (result.verdict === "already_redeemed") return `该授权码（${plan}）已被兑换。`;
+  if (result.verdict === "blocked_lower_tier") return `该授权码为${plan}，低于当前账号档位，兑换会被官方拦截，且不会消耗该授权码。`;
+  if (result.action === "extend") return `可兑换：${plan}同档续期${duration}。`;
+  return `可兑换：${plan}${duration}，兑换后立即升档。`;
+}
+
+function isLicenseCode(code) {
+  return code.toUpperCase().replace(/[\s\-_]/g, "").startsWith("MLIC");
 }
 
 async function createApiKey(event) {
@@ -557,11 +778,40 @@ async function createApiKey(event) {
 async function copyApiKey() {
   if (!state.issuedApiKey) return;
   try {
-    await navigator.clipboard.writeText(state.issuedApiKey);
+    await copyText(state.issuedApiKey);
     showNotice("OpenAI API Key 已复制。", "success");
   } catch {
     showNotice("浏览器未授予剪贴板权限。", "error");
   }
+}
+
+async function copyHistoricalApiKey(event) {
+  const button = event.target.closest("[data-copy-key-id]");
+  if (!button) return;
+  setBusy(button, true, "复制中");
+  try {
+    const result = await request(`/api/keys/${encodeURIComponent(button.dataset.copyKeyId)}/reveal`, { method: "POST" });
+    await copyText(result.key);
+    showNotice("历史 API Key 已复制。", "success");
+  } catch (error) {
+    showNotice(error.message || "无法复制历史 API Key。", "error");
+  } finally {
+    setBusy(button, false, "复制");
+  }
+}
+
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value);
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.setAttribute("readonly", "");
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.append(field);
+  field.select();
+  const copied = document.execCommand("copy");
+  field.remove();
+  if (!copied) throw new Error("Clipboard unavailable");
 }
 
 async function revokeApiKey(event) {
@@ -609,6 +859,50 @@ async function renewAccount(event) {
   }
 }
 
+async function cooldownAccount(event) {
+  const button = event.target.closest("[data-cooldown-account]");
+  if (!button || !window.confirm("将该账号移出中转轮询？在你点击恢复之前它不会再被使用。")) return;
+  setBusy(button, true, "冷却中");
+  try {
+    await request(`/api/accounts/${encodeURIComponent(button.dataset.cooldownAccount)}/cooldown`, { method: "POST" });
+    await loadDashboard();
+    showNotice("该账号已冷却，已停止参与中转轮询。", "success");
+  } catch (error) {
+    showNotice(error.message || "无法冷却该账号。", "error");
+    setBusy(button, false, "冷却");
+  }
+}
+
+async function changeAccountPriority(event) {
+  const select = event.target?.closest?.("select[data-priority-account]");
+  if (!select) return;
+  const priority = select.value === "auto" ? null : Number(select.value);
+  select.disabled = true;
+  try {
+    const result = await request(`/api/accounts/${encodeURIComponent(select.dataset.priorityAccount)}/priority`, { method: "PUT", body: { priority } });
+    await loadDashboard();
+    showNotice(priority === null ? `该账号恢复按档位排序（当前 ${result.priority}）。` : `该账号的轮询优先级已设为 ${result.priority}。`, "success");
+  } catch (error) {
+    showNotice(error.message || "无法调整轮询优先级。", "error");
+  } finally {
+    select.disabled = false;
+  }
+}
+
+async function recoverAccount(event) {
+  const button = event.target.closest("[data-recover-account]");
+  if (!button) return;
+  setBusy(button, true, "恢复中");
+  try {
+    await request(`/api/accounts/${encodeURIComponent(button.dataset.recoverAccount)}/recover`, { method: "POST" });
+    await loadDashboard();
+    showNotice("该账号已恢复中转可用。", "success");
+  } catch (error) {
+    showNotice(error.message || "无法恢复该账号。", "error");
+    setBusy(button, false, "恢复");
+  }
+}
+
 async function restoreAccounts() {
   setBusy(elements.restoreAccounts, true, "恢复中");
   try {
@@ -619,6 +913,53 @@ async function restoreAccounts() {
     showNotice(error.message || "无法恢复本地账户。", "error");
   } finally {
     setBusy(elements.restoreAccounts, false, "恢复本地账户");
+  }
+}
+
+async function importAccounts() {
+  const file = elements.importAccountsFile.files?.[0];
+  elements.importAccountsFile.value = "";
+  if (!file) return;
+  setBusy(elements.importAccounts, true, "导入中");
+  try {
+    if (file.size > 4 * 1024 * 1024) throw new Error("账号文件不能超过 4MB。");
+    const payload = JSON.parse(await file.text());
+    const result = await request("/api/accounts/import", { method: "POST", body: payload });
+    await loadDashboard();
+    showNotice(`已导入 ${result.imported} 个账号${result.skipped ? `，跳过 ${result.skipped} 个重复或无效账号` : ""}。`, "success");
+  } catch (error) {
+    showNotice(error instanceof SyntaxError ? "账号文件不是有效的 JSON。" : error.message || "无法导入账号。", "error");
+  } finally {
+    setBusy(elements.importAccounts, false, "导入账号");
+  }
+}
+
+async function exportAccounts() {
+  if (!window.confirm("导出文件包含账号登录令牌，请将其作为敏感文件保管。继续导出？")) return;
+  setBusy(elements.exportAccounts, true, "导出中");
+  try {
+    const response = await fetch("/api/accounts/export");
+    if (!response.ok) {
+      let payload = null;
+      try { payload = await response.json(); } catch {}
+      throw new Error(apiErrorMessage(payload, response.status, "/api/accounts/export"));
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "mirasim-accounts.json";
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(href);
+    showNotice("账号已导出。", "success");
+  } catch (error) {
+    showNotice(error.message || "无法导出账号。", "error");
+  } finally {
+    setBusy(elements.exportAccounts, false, "导出账号");
   }
 }
 
@@ -676,19 +1017,34 @@ function selectedAccount() {
 }
 
 async function request(url, options = {}) {
-  const response = await fetch(url, {
-    method: options.method || "GET",
-    headers: options.body ? { "Content-Type": "application/json" } : undefined,
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: options.method || "GET",
+      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      body: options.body ? JSON.stringify(options.body) : undefined
+    });
+  } catch (error) {
+    throw new Error(error?.message === "Failed to fetch" ? "无法连接本地网关，请确认服务仍在运行。" : "网络请求失败。");
+  }
   let payload = null;
   try {
     payload = await response.json();
   } catch {
     // The server always returns JSON for API routes.
   }
-  if (!response.ok) throw new Error(payload?.error?.message || "请求失败。");
+  if (!response.ok) throw new Error(apiErrorMessage(payload, response.status, url));
   return payload;
+}
+
+// A 404 answered by the relay's route list means this page is newer than the gateway process serving
+// it, which is what happens when the console is reloaded but the local service was never restarted.
+function apiErrorMessage(payload, status, url) {
+  const message = payload?.error?.message;
+  if (status === 404 && url.startsWith("/api/") && (!message || message.startsWith("Use /"))) {
+    return "本地网关不认识该接口（HTTP 404），请重启本机网关后重试。";
+  }
+  return message || `请求失败（HTTP ${status}）。`;
 }
 
 function setBadge(element, text, className) {
@@ -701,21 +1057,37 @@ function setBusy(button, busy, text) {
   button.textContent = text;
 }
 
+// Notices are a toast in the top-right corner: they announce themselves and then get out of the
+// way. Failures linger longer than confirmations, and a click dismisses either immediately.
+const NOTICE_TIMEOUT_MS = { success: 4_000, error: 8_000 };
+let noticeTimer = 0;
+
 function showNotice(text, type = "error") {
+  clearTimeout(noticeTimer);
   elements.notice.hidden = false;
   elements.notice.textContent = text;
-  elements.notice.style.color = type === "success" ? "var(--green)" : "var(--red)";
-  elements.notice.style.borderColor = type === "success" ? "#9bd6b8" : "#efb4ad";
-  elements.notice.style.background = type === "success" ? "var(--green-soft)" : "var(--red-soft)";
+  elements.notice.dataset.state = type === "success" ? "success" : "error";
+  noticeTimer = setTimeout(hideNotice, NOTICE_TIMEOUT_MS[type] || NOTICE_TIMEOUT_MS.error);
 }
 
 function hideNotice() {
+  clearTimeout(noticeTimer);
+  noticeTimer = 0;
   elements.notice.hidden = true;
+}
+
+// A free account keeps a nominal window on /v1/limits, but the relay answers its completions with
+// "中转的共享额度已用尽", so the pool only falls back to it when no paid account is left.
+function quotaCell(account, windows) {
+  if (account.quota?.availability === "no_quota") return "免费号无中转额度";
+  return windows ? `<ul class="quota-windows">${windows}</ul>` : "官方暂无额度数据";
 }
 
 function availabilityMeta(value) {
   if (value === "available") return { label: "可用", className: "good" };
   if (value === "cooling") return { label: "冷却中", className: "warning" };
+  if (value === "disabled") return { label: "已冷却（停止轮询）", className: "warning" };
+  if (value === "no_quota") return { label: "无额度（最后备用）", className: "warning" };
   return { label: "未登录", className: "bad" };
 }
 
@@ -741,6 +1113,21 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("zh-CN", { hour12: false });
 }
 
+// Table cells only have room for the part of a timestamp that differs between rows.
+function formatCompactTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+// A subscription runs months or years out, so the year the compact table format drops is the
+// part that actually identifies the date; the exact hour stays in the cell's tooltip.
+function formatExpiryDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+}
+
 function formatDuration(milliseconds) {
   const minutes = Math.round(milliseconds / 60_000);
   return minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} 小时` : `${Math.max(1, minutes)} 分钟`;
@@ -748,6 +1135,19 @@ function formatDuration(milliseconds) {
 
 function formatNumber(value) {
   return new Intl.NumberFormat("zh-CN").format(value || 0);
+}
+
+// Token totals reach seven and eight digits, and at that width the card stops reading as a
+// quantity at a glance. K/M/B keeps three significant digits, which is all the summary needs.
+function formatCompactNumber(value) {
+  const amount = numeric(value);
+  for (const [scale, suffix] of [[1e9, "B"], [1e6, "M"], [1e3, "K"]]) {
+    if (Math.abs(amount) < scale) continue;
+    const scaled = amount / scale;
+    const text = scaled.toFixed(Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2);
+    return `${text.includes(".") ? text.replace(/\.?0+$/, "") : text}${suffix}`;
+  }
+  return formatNumber(amount);
 }
 
 function numeric(value) {
@@ -759,18 +1159,15 @@ function formatStatus(status) {
 }
 
 function formatActivityQuota(referral) {
-  const limit = referral.threshold || referral.maxRedemptions;
-  return limit > 0 ? `${referral.redeemed} / ${limit}` : "暂无活动名额";
+  if (referral.threshold > 0) return `${referral.redeemed} / ${referral.threshold}`;
+  return referral.redeemed > 0 ? `已邀请 ${referral.redeemed} 位` : "暂无活动名额";
 }
 
 function accountTypeLabel(value) {
   if (typeof value !== "string") return "";
-  const normalized = value.trim().toLowerCase().replace(/[\s_-]+/g, "-");
+  const normalized = value.trim().toLowerCase();
   if (!normalized) return "";
-  if (normalized === "plus" || normalized.endsWith("-plus")) return "Plus";
-  if (normalized === "max" || normalized.endsWith("-max")) return "Max";
-  const labels = { basic: "基础版", external: "标准版", enterprise: "企业版" };
-  return labels[normalized] || value.trim();
+  return PLAN_LABELS[normalized] || value.trim();
 }
 
 function escapeHtml(value) {

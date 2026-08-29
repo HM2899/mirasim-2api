@@ -61,6 +61,42 @@ test("lists the active Mirasim profile's upstream models through the authenticat
   }
 });
 
+test("lists models through the Anthropic endpoint contract when x-api-key is used", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mirasim-anthropic-models-"));
+  const home = join(root, "account-a");
+  const apiKeyFile = join(root, "api-keys.json");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "setting.json"), JSON.stringify({ auth: { userId: "user-a", token: "mirasim-token", exp: 4_102_444_800 } }));
+  const server = createGateway({
+    host: "127.0.0.1", port: 0, homes: [home], apiKeyFile,
+    relayUrl: "https://relay.example.test", loginUrl: "https://login.example.test",
+    webAuth: { username: "console", password: "correct-password", secureCookie: false },
+    models: [], timeoutMs: 30_000, cooldownMs: 30_000
+  }, {
+    fetchImpl: async () => json({ data: [{ id: "claude-opus-5", created: 123 }] }),
+    logger: { error() {} }
+  });
+
+  try {
+    const { key } = new OpenAIKeyStore(apiKeyFile).create("Anthropic model list test");
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const { port } = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01" }
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      data: [{ type: "model", id: "claude-opus-5", display_name: "claude-opus-5", created_at: "1970-01-01T00:02:03.000Z" }],
+      has_more: false, first_id: "claude-opus-5", last_id: "claude-opus-5"
+    });
+  } finally {
+    server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function json(body) {
   return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 }

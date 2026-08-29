@@ -4,7 +4,9 @@ export class MoeMailClient {
   constructor(config = {}, { fetchImpl = fetch, sleep = delay } = {}) {
     this.url = config.url || "";
     this.apiKey = config.apiKey || "";
-    this.domain = config.domain || "";
+    this.domains = normalizedDomains(config.domains || config.domain);
+    this.domain = this.domains[0] || "";
+    this.domainIndex = 0;
     this.expiryTimeMs = config.expiryTimeMs || 3_600_000;
     this.codeTimeoutMs = config.codeTimeoutMs || 120_000;
     this.pollMs = config.pollMs || 2_500;
@@ -13,7 +15,7 @@ export class MoeMailClient {
   }
 
   isConfigured() {
-    return Boolean(this.url && this.apiKey && this.domain);
+    return Boolean(this.url && this.apiKey && this.domains.length > 0);
   }
 
   async createMailbox() {
@@ -23,7 +25,7 @@ export class MoeMailClient {
       body: JSON.stringify({
         name: `mirasim-${randomBytes(6).toString("hex")}`,
         expiryTime: this.expiryTimeMs,
-        domain: this.domain
+        domain: this.#nextDomain()
       })
     });
     const id = stringValue(data?.id);
@@ -53,6 +55,21 @@ export class MoeMailClient {
     } catch {
       // A temporary inbox can expire independently; cleanup must not hide a completed signup.
     }
+  }
+
+  async listDomains() {
+    if (!this.url || !this.apiKey) throw new MoeMailError(501, "请先填写 MoeMail 服务地址和 API Key。");
+    const data = await this.#request("/api/domains");
+    const values = Array.isArray(data) ? data : Array.isArray(data?.domains) ? data.domains : Array.isArray(data?.data) ? data.data : Array.isArray(data?.items) ? data.items : [];
+    const domains = normalizedDomains(values.map((value) => typeof value === "string" ? value : value?.domain || value?.name));
+    if (domains.length === 0) throw new MoeMailError(502, "MoeMail 未返回可用邮箱域名。");
+    return domains;
+  }
+
+  #nextDomain() {
+    const domain = this.domains[this.domainIndex % this.domains.length];
+    this.domainIndex = (this.domainIndex + 1) % this.domains.length;
+    return domain;
   }
 
   async #request(path, options = {}) {
@@ -105,6 +122,11 @@ function stringValue(value) {
 
 function validEmail(value) {
   return Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value));
+}
+
+function normalizedDomains(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(values.map((item) => String(item || "").trim().toLowerCase()).filter((item) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(item)))];
 }
 
 function delay(ms) {
