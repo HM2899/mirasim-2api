@@ -487,8 +487,8 @@ function maskForeignIdentity(system) {
 // Only a request that says nothing gets a default. A caller that asked for
 // `{ type: "disabled" }` — or for any thinking of its own — is left exactly as it sent it.
 const ADAPTIVE_THINKING_MODEL = /^claude-(?:fable-5|mythos-5|opus-(?:5|4-[678])|sonnet-(?:5|4-6))/i;
-// Below this there is no room for thinking and an answer both, and the turn would truncate
-// mid-thought. Short calls are the utility ones (titles, classification) that want it off.
+// Enough room for thinking and an answer both. A turn under this that asks for no tools is
+// the utility call (titles, classification) that genuinely wants thinking off.
 const MIN_THINKING_MAX_TOKENS = 2048;
 
 function applyDefaultThinking(value, defaultEffort) {
@@ -497,15 +497,25 @@ function applyDefaultThinking(value, defaultEffort) {
   if (!anthropicOnlyModel(model)) return false;
   const budget = REASONING_BUDGET_TOKENS[defaultEffort];
   if (!budget) return false;
+  // Whether the turn declares tools is the signal, not how big its budget is. A turn with
+  // tools is an agent turn, and it is precisely the turn that breaks with thinking off —
+  // Claude writes the call into its visible text and it never runs. Those get thinking
+  // whatever max_tokens says, with room made for it when the caller budgeted none; a client
+  // that asked Codex to look something up should not lose its search tool to a small budget.
+  const agentTurn = Array.isArray(value.tools) && value.tools.length > 0;
+  const maxTokens = Number.isFinite(value.max_tokens) ? value.max_tokens : 0;
   // Current models take adaptive thinking and reject a fixed budget outright; the older ones
   // are the other way round, so the shape has to follow the model.
   if (ADAPTIVE_THINKING_MODEL.test(model)) {
-    if (!Number.isFinite(value.max_tokens) || value.max_tokens < MIN_THINKING_MAX_TOKENS) return false;
+    if (maxTokens < MIN_THINKING_MAX_TOKENS && !agentTurn) return false;
     value.thinking = { type: "adaptive" };
+    value.max_tokens = Math.max(maxTokens, MIN_THINKING_MAX_TOKENS);
     return true;
   }
-  if (!Number.isFinite(value.max_tokens) || value.max_tokens <= budget + THINKING_ANSWER_HEADROOM_TOKENS) return false;
+  const floor = budget + THINKING_ANSWER_HEADROOM_TOKENS;
+  if (maxTokens <= floor && !agentTurn) return false;
   value.thinking = { type: "enabled", budget_tokens: budget };
+  value.max_tokens = Math.max(maxTokens, floor + THINKING_ANSWER_HEADROOM_TOKENS);
   // Extended thinking rejects sampling overrides and forced tool choices.
   delete value.temperature;
   delete value.top_p;

@@ -19,6 +19,11 @@ export class RelayRequestLog {
       protocol: path === "/v1/messages" ? "Anthropic" : path === "/v1/responses" || path === "/backend-api/codex/responses" ? "OpenAI Responses" : "OpenAI Chat",
       model: typeof value?.model === "string" ? value.model : null,
       reasoningEffort: reasoningEffort(value),
+      // Whether a turn asked for tools, and how much room it left for an answer, are what
+      // decide whether it gets thinking — so they belong in the log that diagnoses it.
+      maxTokens: Number.isFinite(value?.max_tokens) ? value.max_tokens
+        : Number.isFinite(value?.max_output_tokens) ? value.max_output_tokens : null,
+      toolCount: Array.isArray(value?.tools) ? value.tools.length : 0,
       stream: value?.stream === true,
       account: null,
       status: null,

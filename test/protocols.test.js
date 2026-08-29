@@ -232,6 +232,36 @@ test("Anthropic Messages converted from OpenAI get a thinking budget on a model 
   }
 });
 
+// The turn that breaks with thinking off is the one that declares tools, so a small budget
+// must not cost it thinking — that is how "ask Codex to look something up and it never calls
+// search" happens. Room for the thinking is made instead.
+test("a tool-bearing turn gets thinking even when the caller budgeted almost no tokens", async () => {
+  const fixture = gatewayFixture(async (url, options) => {
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.thinking, { type: "adaptive" });
+    assert.ok(body.max_tokens >= 2048, `max_tokens must leave room for thinking, got ${body.max_tokens}`);
+    return json({ id: "msg_1", type: "message", role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "OK" }], stop_reason: "end_turn" });
+  }, { defaultReasoningEffort: "medium" });
+
+  try {
+    const key = new OpenAIKeyStore(fixture.apiKeyFile).create("Agent turn test").key;
+    await fixture.start();
+    const response = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-opus-5",
+        max_tokens: 512,
+        tools: [{ name: "web_search", description: "Search the web.", input_schema: { type: "object", properties: { q: { type: "string" } } } }],
+        messages: [{ role: "user", content: "Look up today's release notes." }]
+      })
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    fixture.close();
+  }
+});
+
 test("a caller's own thinking choice is never overridden on Anthropic Messages", async () => {
   const seen = [];
   const fixture = gatewayFixture(async (url, options) => {
