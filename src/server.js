@@ -544,9 +544,12 @@ const SEARCH_FIRST_GUIDANCE = "<search_first>\n"
   + "user marks as recent or time-sensitive — rather than answering from memory. For an "
   + "open-ended research request, start searching immediately instead of asking a scoping "
   + "question first, unless the request is genuinely ambiguous about what to research.\n"
-  + "Search by running a shell command: fetch a search engine or the page directly with "
-  + "curl, wget, or whatever the environment has, read what comes back, and answer from "
-  + "that. That is the route available here — do not answer from memory instead.\n"
+  + "Search by running a shell command — that is the route available here, so do not answer "
+  + "from memory instead. Prefer an endpoint that returns text rather than a page that needs "
+  + "a browser: lite.duckduckgo.com/lite/?q=... works with a plain curl, as does fetching a "
+  + "page through r.jina.ai. URL-encode the query, strip the markup from what comes back, and "
+  + "read the result. One search is rarely enough: follow the promising links and fetch those "
+  + "pages too before answering, and prefer sources that show a date.\n"
   + "</search_first>";
 
 function applySearchFirstGuidance(value) {
