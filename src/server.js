@@ -443,6 +443,7 @@ function prepareRelayBody(body, url, defaultEffort = "none") {
     }
     if (dropRejectedSamplingParams(value)) changed = true;
     if (applyDefaultThinking(value, defaultEffort)) changed = true;
+    if (dropUnrunnableSearchTool(value)) changed = true;
     if (applySearchFirstGuidance(value)) changed = true;
     // After the identity blocks are settled, so the stable-prefix breakpoint lands on the
     // system array the relay actually receives.
@@ -538,15 +539,14 @@ function applyDefaultThinking(value, defaultEffort) {
 // keeps the cache it sits in.
 const SERVER_SEARCH_TOOL = /^web_(?:search|fetch)(?:_|$)/i;
 const SEARCH_FIRST_GUIDANCE = "<search_first>\n"
-  + "You have a web search tool. Use it before answering whenever current information would "
+  + "Look information up before answering whenever current information would "
   + "change the answer — recent events or releases, current prices, versions, or anything the "
   + "user marks as recent or time-sensitive — rather than answering from memory. For an "
   + "open-ended research request, start searching immediately instead of asking a scoping "
   + "question first, unless the request is genuinely ambiguous about what to research.\n"
-  + "If the search tool is unavailable or refuses — some environments restrict it — do not "
-  + "give up and answer from memory. Fall back to a shell command instead: fetch a search "
-  + "engine or the site directly (curl, wget, or whatever the environment has), read what "
-  + "comes back, and answer from that. Say which route you used.\n"
+  + "Search by running a shell command: fetch a search engine or the page directly with "
+  + "curl, wget, or whatever the environment has, read what comes back, and answer from "
+  + "that. That is the route available here — do not answer from memory instead.\n"
   + "</search_first>";
 
 function applySearchFirstGuidance(value) {
@@ -555,6 +555,21 @@ function applySearchFirstGuidance(value) {
   const system = contentBlocks(value.system) || [];
   if (system.some((block) => typeof block?.text === "string" && block.text.includes("<search_first>"))) return false;
   value.system = [...system, { type: "text", text: SEARCH_FIRST_GUIDANCE }];
+  return true;
+}
+
+// A server tool is run by Anthropic, so the client never invokes it and — where the client
+// restricts it, as Codex does — never gets to. Offering it only invites a call that dies.
+// Withdrawing it leaves the model the client's own shell, which the client really does run,
+// so the search executes through the same tool-call path as everything else the client does.
+const CLIENT_SHELL_TOOL = /^(?:exec_command|bash|shell|run_command|execute)/i;
+
+function dropUnrunnableSearchTool(value) {
+  const tools = Array.isArray(value.tools) ? value.tools : [];
+  if (!tools.some((tool) => typeof tool?.name === "string" && CLIENT_SHELL_TOOL.test(tool.name))) return false;
+  const kept = tools.filter((tool) => typeof tool?.type !== "string" || !SERVER_SEARCH_TOOL.test(tool.type));
+  if (kept.length === tools.length) return false;
+  value.tools = kept;
   return true;
 }
 
