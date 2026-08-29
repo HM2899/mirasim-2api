@@ -444,7 +444,6 @@ function prepareRelayBody(body, url, defaultEffort = "none") {
     if (dropRejectedSamplingParams(value)) changed = true;
     if (applyDefaultThinking(value, defaultEffort)) changed = true;
     if (applySearchFirstGuidance(value)) changed = true;
-    if (clientSideSearchTools(value)) changed = true;
     // After the identity blocks are settled, so the stable-prefix breakpoint lands on the
     // system array the relay actually receives.
     if (applyCacheBreakpoints(value)) changed = true;
@@ -552,28 +551,6 @@ function applySearchFirstGuidance(value) {
   const system = contentBlocks(value.system) || [];
   if (system.some((block) => typeof block?.text === "string" && block.text.includes("<search_first>"))) return false;
   value.system = [...system, { type: "text", text: SEARCH_FIRST_GUIDANCE }];
-  return true;
-}
-
-// A server tool is run by Anthropic and reported as server_tool_use, which the OpenAI
-// protocols cannot describe — so a converting gateway drops it and the client is never told
-// the tool ran, let alone asked to run it. Declaring it as an ordinary tool instead makes
-// Claude emit a normal tool_use block, which every converter already turns into a function
-// call, so the client invokes the tool its own way and executes it itself.
-function clientSideSearchTools(value) {
-  const tools = Array.isArray(value.tools) ? value.tools : [];
-  if (!tools.some((tool) => typeof tool?.type === "string" && SERVER_SEARCH_TOOL.test(tool.type))) return false;
-  value.tools = tools.map((tool) => {
-    if (typeof tool?.type !== "string" || !SERVER_SEARCH_TOOL.test(tool.type)) return tool;
-    const fetching = /^web_fetch/i.test(tool.type);
-    return {
-      name: tool.name || (fetching ? "web_fetch" : "web_search"),
-      description: fetching ? "Fetch the contents of a URL." : "Search the web and return results.",
-      input_schema: fetching
-        ? { type: "object", properties: { url: { type: "string" } }, required: ["url"] }
-        : { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
-    };
-  });
   return true;
 }
 
