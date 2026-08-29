@@ -297,7 +297,7 @@ test("a request offering a server-side search tool is told when to search", asyn
 // Anthropic runs a server tool itself and reports it as server_tool_use, which the OpenAI
 // protocols cannot describe — a converting gateway drops the block and the search becomes
 // invisible to the client even though it ran. Carrying it through as text survives that.
-test("a server tool the relay ran is surfaced as text the client can see", async () => {
+test("a server tool the relay ran is surfaced inside the answer the client renders", async () => {
   const upstream = [
     'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":5}}}\n\n',
     'data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{}}}\n\n',
@@ -323,14 +323,17 @@ test("a server tool the relay ran is surfaced as text the client can see", async
       })
     });
     const body = await response.text();
-    // Every frame still parses, and the block kept its index — only its type changed.
-    for (const line of body.split("\n").filter((entry) => entry.startsWith("data:"))) {
-      JSON.parse(line.slice(5).trim());
-    }
-    assert.match(body, /"type":"text","text":"🔍 web_search /, "the call is carried through as text");
-    assert.match(body, /"type":"text_delta","text":"\{\\"query/, "its input becomes that text");
-    assert.doesNotMatch(body, /"content_block":\{"type":"server_tool_use"/, "nothing downstream can read that type");
-    assert.match(body, /Two new songs\./, "the answer itself is untouched");
+    for (const line of body.split("\n").filter((entry) => entry.startsWith("data:"))) JSON.parse(line.slice(5).trim());
+
+    // The note rides in the model's own text delta, so anything that renders the answer
+    // renders the note — and the answer itself still follows it intact.
+    const deltas = body.split("\n").filter((l) => l.startsWith("data:")).map((l) => JSON.parse(l.slice(5).trim()))
+      .filter((e) => e.type === "content_block_delta" && e.delta?.type === "text_delta")
+      .map((e) => e.delta.text).join("");
+    assert.match(deltas, /🔍 web_search new songs/, "the query is shown");
+    assert.match(deltas, /Two new songs\.$/, "the answer follows it unchanged");
+    // The block itself is untouched: no index gaps for a converter to trip over.
+    assert.match(body, /"content_block":\{"type":"server_tool_use"/);
   } finally {
     fixture.close();
   }
