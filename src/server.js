@@ -360,7 +360,6 @@ async function relayRequest(request, response, config, pool, usage, fetchImpl, u
       dropUsageOnlyFrames: prepared.injectedUsage && responseHandler === forwardResponse
     });
   }
-  if (prepared.surfaceServerTools) upstream = surfaceServerToolActivity(upstream);
   return responseHandler(response, upstream);
 }
 
@@ -456,11 +455,7 @@ function prepareRelayBody(body, url, defaultEffort = "none") {
     changed = true;
     injectedUsage = true;
   }
-  return {
-    body: changed ? Buffer.from(JSON.stringify(value)) : body,
-    injectedUsage,
-    surfaceServerTools: protocolForPath(url.pathname) === "anthropic" && hasServerTool(value)
-  };
+  return { body: changed ? Buffer.from(JSON.stringify(value)) : body, injectedUsage };
 }
 
 // The relay rejects a /v1/messages system block that opens with the Codex agent identity
@@ -557,95 +552,6 @@ function applySearchFirstGuidance(value) {
   if (system.some((block) => typeof block?.text === "string" && block.text.includes("<search_first>"))) return false;
   value.system = [...system, { type: "text", text: SEARCH_FIRST_GUIDANCE }];
   return true;
-}
-
-function hasServerTool(value) {
-  return Array.isArray(value.tools)
-    && value.tools.some((tool) => typeof tool?.type === "string" && SERVER_SEARCH_TOOL.test(tool.type));
-}
-
-// Anthropic runs a server tool itself and reports it as server_tool_use, but the OpenAI
-// protocols have no way to describe a tool the client never ran — so a gateway converting the
-// response back drops the block, and the search becomes invisible to the client even though it
-// happened. Rewriting the block as ordinary text carries it through anything that speaks the
-// protocol at all. The block keeps its index, so the stream's shape is unchanged; only its
-// type is. The bulky web_search_tool_result that follows is deliberately left as-is for the
-// converter to drop, since the client wants to see that a search ran, not its raw results.
-const SERVER_TOOL_TEXT_PREFIX = "🔍 ";
-
-function surfaceServerToolActivity(upstream) {
-  const contentType = upstream.headers?.get?.("content-type") || "";
-  if (!upstream.ok || !upstream.body) return upstream;
-  if (!contentType.includes("text/event-stream")) return jsonServerToolActivity(upstream);
-  // The note rides inside the model's own first text block rather than a block of its own.
-  // A converter that renders the answer at all therefore renders the note too — a separate
-  // block, however well formed, is a structure it may simply not carry.
-  const state = { pending: new Map(), queries: [], injected: false };
-  let buffer = "";
-  const decoder = new TextDecoder("utf-8", { fatal: false });
-  const encoder = new TextEncoder();
-  const transform = new TransformStream({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const frames = buffer.split(/\r?\n\r?\n/);
-      buffer = frames.pop();
-      for (const frame of frames) controller.enqueue(encoder.encode(`${noteServerToolFrame(frame, state)}\n\n`));
-    },
-    flush(controller) {
-      if (buffer) controller.enqueue(encoder.encode(noteServerToolFrame(buffer, state)));
-    }
-  });
-  const body = upstream.body.pipeThrough(transform);
-  return { ok: upstream.ok, status: upstream.status, headers: upstream.headers, body,
-    text: () => new Response(body).text(), json: () => new Response(body).json() };
-}
-
-// Collects what each server tool was asked, then prepends it to the first text the model
-// streams. The server_tool_use blocks are left exactly as they are for the converter to drop.
-function noteServerToolFrame(frame, state) {
-  return frame.split(/\r?\n/).map((line) => {
-    if (!line.startsWith("data:")) return line;
-    const event = parseJsonObject(Buffer.from(line.slice(5).trimStart()));
-    if (!event) return line;
-    if (event.type === "content_block_start" && event.content_block?.type === "server_tool_use") {
-      state.pending.set(event.index, { name: event.content_block.name || "server tool", json: "" });
-      return line;
-    }
-    if (event.type === "content_block_delta" && state.pending.has(event.index) && event.delta?.type === "input_json_delta") {
-      state.pending.get(event.index).json += event.delta.partial_json || "";
-      return line;
-    }
-    if (event.type === "content_block_stop" && state.pending.has(event.index)) {
-      const { name, json } = state.pending.get(event.index);
-      state.pending.delete(event.index);
-      state.queries.push(`${SERVER_TOOL_TEXT_PREFIX}${name} ${serverToolQuery(json)}`);
-      return line;
-    }
-    if (!state.injected && state.queries.length && event.type === "content_block_delta" && event.delta?.type === "text_delta") {
-      state.injected = true;
-      const note = `${state.queries.join("\n")}\n\n`;
-      return `data: ${JSON.stringify({ ...event, delta: { ...event.delta, text: note + (event.delta.text || "") } })}`;
-    }
-    return line;
-  }).join("\n");
-}
-
-// The readable query if the tool streamed one, and the raw input otherwise.
-function serverToolQuery(json) {
-  const parsed = parseJsonObject(Buffer.from(json || "{}"));
-  return typeof parsed?.query === "string" ? parsed.query : (json || "").trim();
-}
-
-async function jsonServerToolActivity(upstream) {
-  const raw = await upstream.text().catch(() => "");
-  const payload = parseJsonObject(Buffer.from(raw));
-  if (!Array.isArray(payload?.content)) {
-    return new Response(raw || null, { status: upstream.status, headers: upstream.headers });
-  }
-  payload.content = payload.content.map((block) => block?.type === "server_tool_use"
-    ? { type: "text", text: `${SERVER_TOOL_TEXT_PREFIX}${block.name || "server tool"} ${JSON.stringify(block.input ?? {})}` }
-    : block);
-  return new Response(JSON.stringify(payload), { status: upstream.status, headers: upstream.headers });
 }
 
 // See RELAY_ACCEPTED_TEMPERATURE: the relay only tolerates the official client's exact
