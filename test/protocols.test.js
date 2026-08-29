@@ -262,6 +262,38 @@ test("a tool-bearing turn gets thinking even when the caller budgeted almost no 
   }
 });
 
+// Offering a search tool is not enough: with a foreign system prompt in front of it Claude
+// answers from memory instead of reaching for search. Naming the cases that need current
+// information is what gets it used.
+test("a request offering a server-side search tool is told when to search", async () => {
+  const seen = [];
+  const fixture = gatewayFixture(async (url, options) => {
+    seen.push(JSON.parse(options.body).system);
+    return json({ id: "msg_1", type: "message", role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "OK" }], stop_reason: "end_turn" });
+  }, { defaultReasoningEffort: "medium" });
+
+  const send = (tools) => fetch(`${fixture.baseUrl}/v1/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": fixture.key, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model: "claude-opus-5", max_tokens: 16_000, system: "You are Codex, based on GPT-5.", tools, messages: [{ role: "user", content: "What shipped recently?" }] })
+  });
+
+  try {
+    fixture.key = new OpenAIKeyStore(fixture.apiKeyFile).create("Search guidance test").key;
+    await fixture.start();
+    await send([{ type: "web_search_20250305", name: "web_search" }]);
+    // A client-side tool of the same name is Claude Code's own, and carries its own prompt.
+    await send([{ name: "WebSearch", description: "Search.", input_schema: { type: "object", properties: {} } }]);
+
+    const guided = seen[0].some((block) => block.text.includes("<search_first>"));
+    const untouched = seen[1].every((block) => !block.text.includes("<search_first>"));
+    assert.ok(guided, "a server-side search tool must come with guidance on when to use it");
+    assert.ok(untouched, "a client-side tool belongs to a client that brought its own prompt");
+  } finally {
+    fixture.close();
+  }
+});
+
 test("a caller's own thinking choice is never overridden on Anthropic Messages", async () => {
   const seen = [];
   const fixture = gatewayFixture(async (url, options) => {

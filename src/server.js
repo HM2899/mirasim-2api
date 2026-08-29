@@ -443,6 +443,7 @@ function prepareRelayBody(body, url, defaultEffort = "none") {
     }
     if (dropRejectedSamplingParams(value)) changed = true;
     if (applyDefaultThinking(value, defaultEffort)) changed = true;
+    if (applySearchFirstGuidance(value)) changed = true;
     // After the identity blocks are settled, so the stable-prefix breakpoint lands on the
     // system array the relay actually receives.
     if (applyCacheBreakpoints(value)) changed = true;
@@ -522,6 +523,34 @@ function applyDefaultThinking(value, defaultEffort) {
   if (value.tool_choice && value.tool_choice.type !== "auto" && value.tool_choice.type !== "none") {
     value.tool_choice = { type: "auto" };
   }
+  return true;
+}
+
+// Claude reaches for web search far less readily once a system prompt is present: it answers
+// from what it already knows unless it is confident a search is needed. A client whose prompt
+// was written for another model — Codex's is written for GPT-5 — says nothing about when to
+// search, so the tool is offered and then almost never used on its own. Naming the cases that
+// need current information is the documented way to restore that.
+//
+// Only a request that offers a server-side search tool gets this, which is exactly the
+// converted-gateway case; Claude Code carries its own client-side WebSearch and its own
+// prompt, and is left alone. The text is fixed, so it stays byte-stable across turns and
+// keeps the cache it sits in.
+const SERVER_SEARCH_TOOL = /^web_(?:search|fetch)(?:_|$)/i;
+const SEARCH_FIRST_GUIDANCE = "<search_first>\n"
+  + "You have a web search tool. Use it before answering whenever current information would "
+  + "change the answer — recent events or releases, current prices, versions, or anything the "
+  + "user marks as recent or time-sensitive — rather than answering from memory. For an "
+  + "open-ended research request, start searching immediately instead of asking a scoping "
+  + "question first, unless the request is genuinely ambiguous about what to research.\n"
+  + "</search_first>";
+
+function applySearchFirstGuidance(value) {
+  const tools = Array.isArray(value.tools) ? value.tools : [];
+  if (!tools.some((tool) => typeof tool?.type === "string" && SERVER_SEARCH_TOOL.test(tool.type))) return false;
+  const system = contentBlocks(value.system) || [];
+  if (system.some((block) => typeof block?.text === "string" && block.text.includes("<search_first>"))) return false;
+  value.system = [...system, { type: "text", text: SEARCH_FIRST_GUIDANCE }];
   return true;
 }
 
