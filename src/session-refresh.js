@@ -1,15 +1,18 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 const REFRESH_WINDOW_SECONDS = 5 * 60;
 const CHECK_INTERVAL_MS = 60_000;
 const FAILED_CHECK_INTERVAL_MS = 5 * 60_000;
 const REFRESH_TIMEOUT_MS = 12_000;
+const REQUEST_WAIT_MS = 250;
 
 export class MirasimSessionRefresher {
   #nextCheckAt = new Map();
   #inFlight = new Map();
   #failures = new Map();
+  #timer = null;
 
   constructor(config, { fetchImpl = fetch, now = () => Date.now() } = {}) {
     this.config = config;
@@ -21,7 +24,47 @@ export class MirasimSessionRefresher {
     await Promise.all(homes.map((home) => this.refreshIfNeeded(home)));
   }
 
+  refreshInBackground(homes) {
+    void this.refreshAll(homes).catch(() => {});
+  }
+
+  start() {
+    if (this.#timer) return;
+    this.#timer = setInterval(() => this.refreshInBackground(this.config.homes), CHECK_INTERVAL_MS);
+    this.#timer.unref();
+  }
+
+  stop() {
+    clearInterval(this.#timer);
+    this.#timer = null;
+  }
+
+  async refreshUntilReady(homes, isReady) {
+    let available = isReady();
+    const ready = Promise.withResolvers();
+    const refreshed = Promise.all(homes.map(async (home) => {
+      const updated = await this.refreshIfNeeded(home);
+      if (!available && updated && isReady()) {
+        available = true;
+        ready.resolve();
+      }
+    }));
+    if (available) ready.resolve();
+    let timer;
+    try {
+      await Promise.race([
+        ready.promise,
+        refreshed,
+        new Promise((resolve) => { timer = setTimeout(resolve, REQUEST_WAIT_MS); })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async refreshIfNeeded(home) {
+    const active = this.#inFlight.get(home);
+    if (active) return active;
     const now = this.now();
     if ((this.#nextCheckAt.get(home) || 0) > now) return false;
     return this.#start(home, now, false);
@@ -103,9 +146,8 @@ export function saveRefreshedAuth(home, token, refreshToken) {
   if (userId) updatedAuth.userId = userId;
   if (typeof refreshToken === "string" && refreshToken) updatedAuth.refreshToken = refreshToken;
   setting.auth = updatedAuth;
-  const mode = exists ? statSync(settingPath).mode & 0o777 : 0o600;
-  const temporaryPath = `${settingPath}.${process.pid}.tmp`;
-  writeFileSync(temporaryPath, `${JSON.stringify(setting, null, 2)}\n`, { mode: mode || 0o600 });
+  const temporaryPath = `${settingPath}.${randomUUID()}.tmp`;
+  writeFileSync(temporaryPath, `${JSON.stringify(setting, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   renameSync(temporaryPath, settingPath);
 }
 

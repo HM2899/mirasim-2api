@@ -31,6 +31,24 @@ test("console-generated API Keys protect OpenAI endpoints and can be revoked", a
     assert.equal(denied.status, 401);
     assert.equal((await denied.json()).error.code, "invalid_api_key");
 
+    for (const path of ["/api/dashboard", "/api/keys", "/api/model-health", "/api/accounts/export"]) {
+      const expired = await fetch(`${baseUrl}${path}`);
+      assert.equal(expired.status, 401);
+      assert.deepEqual((await expired.json()).error, {
+        message: "请先登录 Web 控制台。", type: "authentication_error", param: null, code: "web_session_required"
+      });
+    }
+    const page = await fetch(`${baseUrl}/`, { redirect: "manual" });
+    assert.equal(page.status, 302);
+    assert.equal(page.headers.get("location"), "/login");
+    const badLogin = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "console", password: "wrong-password" })
+    });
+    assert.equal(badLogin.status, 401);
+    assert.notEqual((await badLogin.json()).error.code, "web_session_required");
+
     const login = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -61,6 +79,12 @@ test("console-generated API Keys protect OpenAI endpoints and can be revoked", a
     const revoked = await fetch(`${baseUrl}/api/keys/${encodeURIComponent(key.record.id)}`, { method: "DELETE", headers: { Cookie: cookie } });
     assert.equal(revoked.status, 200);
     assert.equal((await fetch(`${baseUrl}/v1/models`, { headers: { Authorization: `Bearer ${key.key}` } })).status, 401);
+
+    const logout = await fetch(`${baseUrl}/api/auth/logout`, { method: "POST", headers: { Cookie: cookie } });
+    assert.equal(logout.status, 200);
+    const stale = await fetch(`${baseUrl}/api/keys`, { headers: { Cookie: cookie } });
+    assert.equal(stale.status, 401);
+    assert.equal((await stale.json()).error.code, "web_session_required");
   } finally {
     server.close();
     rmSync(root, { recursive: true, force: true });

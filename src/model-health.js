@@ -1,6 +1,11 @@
+import { MIRASIM_CLIENT_VERSION } from "./mirasim-release.js";
+
 const DEFAULT_SCAN_INTERVAL_MS = 1_800_000;
 const DEFAULT_TIMEOUT_MS = 12_000;
+const MAX_TIMER_MS = 2_147_483_647;
 
+// Health is model-scoped. Discovery and each availability check use the pool's currently
+// selected usable profile, rather than presenting a separate result for every account.
 export class MirasimModelHealth {
   #running = null;
   #discovering = null;
@@ -35,6 +40,9 @@ export class MirasimModelHealth {
   start() {
     if (this.#timer) return;
     void this.discover().catch(() => {});
+    // A longer interval than a timer can hold would wrap to 1 ms and probe back to back, so it
+    // reads as the way to switch scheduled scans off.
+    if (this.scanIntervalMs > MAX_TIMER_MS) return;
     this.#timer = setInterval(() => void this.scanNext().catch(() => {}), this.scanIntervalMs);
     this.#timer.unref?.();
   }
@@ -77,11 +85,10 @@ export class MirasimModelHealth {
   async scanNext() {
     if (this.#running) return this.snapshot();
     if (this.#state.models.length === 0) await this.discover();
-    const models = this.#state.models;
-    if (models.length === 0) return this.snapshot();
-    const index = this.#state.nextScanIndex % models.length;
-    const modelId = models[index].id;
-    this.#state = { ...this.#state, nextScanIndex: (index + 1) % models.length };
+    if (this.#state.models.length === 0) return this.snapshot();
+    const index = this.#state.nextScanIndex % this.#state.models.length;
+    const modelId = this.#state.models[index].id;
+    this.#state = { ...this.#state, nextScanIndex: (index + 1) % this.#state.models.length };
     this.#persist();
     return this.runOne(modelId);
   }
@@ -145,9 +152,10 @@ export class MirasimModelHealth {
   async #discoverModels() {
     const profile = this.pool.pick();
     if (!profile) throw requestError(503, "没有可用的已登录账号，无法获取模型列表。");
-    const response = await this.#request("/v1/models", {
+    const path = "/v1/models";
+    const response = await this.#request(path, {
       method: "GET",
-      headers: await this.#headers(profile, "GET", "/v1/models")
+      headers: await this.#headers(profile, "GET", path)
     });
     if (!response.ok) throw requestError(502, `上游模型列表请求失败（HTTP ${response.status}）。`);
     const body = await response.json().catch(() => null);
@@ -161,18 +169,25 @@ export class MirasimModelHealth {
   async #probe(id) {
     const checkedAt = new Date(this.now()).toISOString();
     const startedAt = this.now();
+    await this.sessionRefresher?.refreshAll(this.config.homes);
     const profile = this.pool.pick();
     if (!profile) return result(id, "unavailable", checkedAt, this.now() - startedAt, 0, "没有可用的已登录账号。");
     try {
+      // Every model — Claude included — is checked the same way: one `GET /v1/limits` reading
+      // of the model's quota/availability. No generation request is sent for any model, so a
+      // check never consumes model allowance and never depends on the relay admitting a
+      // Messages client. A healthy result means the model is offered, not that inference ran.
       const path = "/v1/limits";
       const response = await this.#request(path, {
         method: "GET",
         headers: await this.#headers(profile, "GET", path)
       });
       const latencyMs = this.now() - startedAt;
-      if (response.ok) return result(id, "healthy", checkedAt, latencyMs, response.status, "可正常响应。");
-      const data = await response.json().catch(() => null);
-      return result(id, stateForStatus(response.status), checkedAt, latencyMs, response.status, errorMessage(data, response.status));
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        return result(id, stateForStatus(response.status), checkedAt, latencyMs, response.status, errorMessage(data, response.status));
+      }
+      return resultForLimit(id, await response.json().catch(() => null), checkedAt, latencyMs, response.status);
     } catch (error) {
       return result(id, "unavailable", checkedAt, this.now() - startedAt, 0, error?.name === "AbortError" ? "检测超时。" : "网络请求失败。");
     }
@@ -188,23 +203,66 @@ export class MirasimModelHealth {
     }
   }
 
-  async #headers(profile, method, path, body = "") {
-    if (this.relaySessions) return this.relaySessions.headersFor(profile, { method, path, body });
-    return { Accept: "application/json", "Content-Type": "application/json", "x-mirasim-client": this.config.clientVersion || "0.0.239", Authorization: `Bearer ${profile.token}` };
+  async #headers(profile, method, path, body = "", options = {}) {
+    if (this.relaySessions) return this.relaySessions.headersFor(profile, { method, path, body, ...options });
+    return {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "x-mirasim-client": this.config.clientVersion || MIRASIM_CLIENT_VERSION,
+      Authorization: `Bearer ${profile.token}`
+    };
   }
 }
 
 function pendingResult(id) { return result(id, "pending", null, null, null, "尚未检测。"); }
-function result(id, status, checkedAt, latencyMs, httpStatus, message) { return { id, status, checkedAt, latencyMs: Number.isFinite(latencyMs) ? Math.max(0, Math.round(latencyMs)) : null, httpStatus, message }; }
+function result(id, status, checkedAt, latencyMs, httpStatus, message) {
+  return {
+    id,
+    status,
+    checkedAt,
+    latencyMs: Number.isFinite(latencyMs) ? Math.max(0, Math.round(latencyMs)) : null,
+    httpStatus,
+    message
+  };
+}
+function resultForLimit(id, data, checkedAt, latencyMs, httpStatus) {
+  const model = data?.models?.[id];
+  if (model?.available === false) {
+    const status = model.status === "limited" || model.status === "rate_limited" ? "limited"
+      : model.status === "unauthorized" ? "unauthorized" : "unavailable";
+    const message = typeof model.message === "string" && model.message.trim()
+      ? model.message.trim().slice(0, 240)
+      : status === "limited" ? "模型额度受限。" : "模型暂不可用。";
+    return result(id, status, checkedAt, latencyMs, httpStatus, message);
+  }
+  return result(id, "healthy", checkedAt, latencyMs, httpStatus, "可正常响应。");
+}
 function stateForStatus(status) { return status === 429 ? "limited" : status === 401 || status === 403 ? "unauthorized" : "unavailable"; }
-function errorMessage(data, status) { const message = data?.error?.message || data?.message || data?.detail; return typeof message === "string" && message.trim() ? message.trim().slice(0, 240) : `上游返回 HTTP ${status}。`; }
-function positiveNumber(value, fallback) { return Number.isInteger(value) && value > 0 ? value : fallback; }
+function errorMessage(data, status) {
+  const message = data?.error?.message || data?.message || data?.detail || data?.reason;
+  return typeof message === "string" && message.trim() ? message.trim().slice(0, 240) : `上游返回 HTTP ${status}。`;
+}
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
 function callableModelId(value) { return typeof value === "string" && value.trim() !== "" && value.trim() !== "*"; }
 function requestError(statusCode, message) { const error = new Error(message); error.statusCode = statusCode; return error; }
 function savedModels(models) {
   if (!Array.isArray(models)) return [];
   return models.flatMap((model) => {
     if (!model || typeof model.id !== "string" || !callableModelId(model.id)) return [];
-    return [result(model.id.trim(), typeof model.status === "string" ? model.status : "pending", typeof model.checkedAt === "string" ? model.checkedAt : null, Number.isFinite(model.latencyMs) ? model.latencyMs : null, Number.isInteger(model.httpStatus) ? model.httpStatus : null, typeof model.message === "string" ? model.message : "尚未检测。")];
+    // A Claude row saved by the removed Claude Code probe is not native Messages evidence,
+    // whatever it says, so it resets to pending rather than being relabelled as a native
+    // result. The next check replaces it. Non-Claude history is preserved as it was.
+    if (model.mode === "claude-code") return [pendingResult(model.id.trim())];
+    return [result(
+      model.id.trim(),
+      typeof model.status === "string" ? model.status : "pending",
+      typeof model.checkedAt === "string" ? model.checkedAt : null,
+      Number.isFinite(model.latencyMs) ? model.latencyMs : null,
+      Number.isInteger(model.httpStatus) ? model.httpStatus : null,
+      typeof model.message === "string" ? model.message : "尚未检测。"
+    )];
   });
 }

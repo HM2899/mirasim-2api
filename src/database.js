@@ -12,6 +12,8 @@ export class StateDatabase {
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      DROP TABLE IF EXISTS usage_costs;
+      DELETE FROM meta WHERE key = 'usage_cost_started_at';
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS accounts (
         home TEXT PRIMARY KEY,
@@ -121,6 +123,18 @@ export class StateDatabase {
       .run(JSON.stringify(health));
   }
 
+  // The rotation mode the operator picked, replayed onto the pool at startup. A plain setting
+  // rather than an encrypted one: it is a preference, not a credential.
+  getRotationMode() {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'rotation_mode'").get();
+    return typeof row?.value === "string" && row.value ? row.value : null;
+  }
+
+  saveRotationMode(mode) {
+    this.db.prepare("INSERT INTO settings(key, value) VALUES ('rotation_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(mode);
+  }
+
   saveApiKeySecret(id, value, secret) {
     this.db.prepare("UPDATE api_keys SET secret = ? WHERE id = ?").run(encrypt(value, secret), id);
   }
@@ -158,9 +172,13 @@ export class StateDatabase {
   }
 
   hasWebSession(id, now = Date.now()) {
+    return this.webSessionExpiresAt(id, now) !== null;
+  }
+
+  webSessionExpiresAt(id, now = Date.now()) {
     this.pruneWebSessions(now);
-    const row = this.db.prepare("SELECT 1 FROM web_sessions WHERE id_hash = ? AND expires_at > ?").get(sessionHash(id), now);
-    return Boolean(row);
+    const row = this.db.prepare("SELECT expires_at FROM web_sessions WHERE id_hash = ? AND expires_at > ?").get(sessionHash(id), now);
+    return row?.expires_at ?? null;
   }
 
   removeWebSession(id) {

@@ -8,7 +8,7 @@
     "start": "node src/index.js",
     "login": "node src/index.js login",
     "relay": "node src/index.js relay",
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=22.5"

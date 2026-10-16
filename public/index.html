@@ -16,12 +16,15 @@
         </div>
 
         <nav class="nav-menu" aria-label="工作区">
-          <button id="nav-overview" class="nav-item active" type="button"><span class="nav-icon nav-icon-grid" aria-hidden="true"></span>概览</button>
-          <button id="nav-activity" class="nav-item" type="button"><span class="nav-icon nav-icon-activity" aria-hidden="true"></span>邀请活动</button>
-          <button id="nav-api-keys" class="nav-item" type="button"><span class="nav-icon nav-icon-key" aria-hidden="true"></span>API 密钥</button>
-          <button id="nav-account-pool" class="nav-item" type="button"><span class="nav-icon nav-icon-users" aria-hidden="true"></span>账号池</button>
-          <button id="nav-model-health" class="nav-item" type="button"><span class="nav-icon nav-icon-heartbeat" aria-hidden="true"></span>模型健康</button>
-          <button id="nav-usage-log" class="nav-item" type="button"><span class="nav-icon nav-icon-activity" aria-hidden="true"></span>使用明细</button>
+          <p class="nav-section-label">工作区</p>
+          <button id="nav-overview" class="nav-item active" type="button" aria-current="page"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>概览</button>
+          <button id="nav-activity" class="nav-item" type="button"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v9h14v-9M12 8v13M12 8H8a3 3 0 1 1 3-3l1 3Zm0 0h4a3 3 0 1 0-3-3l-1 3Z"/></svg>邀请活动</button>
+          <p class="nav-section-label">资源管理</p>
+          <button id="nav-api-keys" class="nav-item" type="button"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-3-3 3-3m-6 0 3-3"/></svg>API 密钥</button>
+          <button id="nav-account-pool" class="nav-item" type="button"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 4a3 3 0 0 1 0 6m2 4a5 5 0 0 1 3 4v3"/></svg>账号池</button>
+          <p class="nav-section-label">运行监控</p>
+          <button id="nav-model-health" class="nav-item" type="button"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h5l3-8 4 16 3-8h5"/></svg>模型健康</button>
+          <button id="nav-usage-log" class="nav-item" type="button"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>使用明细</button>
         </nav>
 
         <div class="sider-footer">
@@ -37,6 +40,7 @@
 
       <div class="workspace">
         <header class="workspace-header">
+          <div class="workspace-location"><span>工作区</span><span aria-hidden="true">/</span><strong id="workspace-location">运行概览</strong></div>
           <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">M</span><span>Mirasim Relay</span></div>
           <div class="header-actions">
             <button id="refresh" class="button button-secondary" type="button">刷新数据</button>
@@ -46,28 +50,34 @@
 
         <main class="shell">
           <div id="notice" class="notice" role="status" aria-live="polite" title="点击关闭" hidden></div>
+          <p id="dashboard-sync-status" class="console-inline-error dashboard-sync-status" role="status" hidden></p>
 
           <section id="overview-view" class="view-panel">
             <div class="page-heading">
               <div>
                 <p class="eyebrow">CONTROL CONSOLE</p>
-                <h1>概览</h1>
-                <p class="page-description">账号池和本机中转用量的聚合统计。</p>
+                <h1>运行概览</h1>
+                <p class="page-description">从账号供给到模型状态，一眼掌握中转运行情况。</p>
               </div>
               <p id="updated-at" class="updated-at">正在读取账号状态</p>
             </div>
 
+            <section class="overview-pulse" aria-label="运行摘要"><div><span class="eyebrow">RELAY SNAPSHOT</span><h2 id="overview-pulse-title">正在读取运行状态</h2><p id="overview-pulse-copy">统计每 60 秒更新，也可手动刷新。</p></div><button id="overview-open-pool" class="button button-secondary" type="button">管理账号池 →</button></section>
+            <div class="section-heading overview-section-heading"><h2>用量与账号</h2><span class="section-hint">聚合快照 · 非实时趋势</span></div>
             <div class="overview-grid" aria-label="中转概览">
               <article class="overview-stat tone-blue"><span>账号总数</span><strong id="overview-account-count">0</strong><small>已配置账号槽位</small></article>
-              <article class="overview-stat tone-green"><span>已登录账号</span><strong id="overview-signed-in-count">0</strong><small>可供中转使用</small></article>
-              <article class="overview-stat tone-orange"><span>可用账号</span><strong id="overview-available-count">0</strong><small>当前未处于冷却</small></article>
+              <article class="overview-stat tone-green"><span>已登录账号</span><strong id="overview-signed-in-count">0</strong><small>已保存登录态，不代表可用</small></article>
+              <article class="overview-stat tone-orange"><span>可用账号</span><strong id="overview-available-count">0</strong><small>符合当前轮询条件</small></article>
               <article class="overview-stat tone-blue"><span>累计请求</span><strong id="overview-request-count">0</strong><small>本进程已记录</small></article>
               <article class="overview-stat tone-green"><span>输入 Token</span><strong id="overview-input-tokens">0</strong><small>官方记录汇总</small></article>
               <article class="overview-stat tone-orange"><span>输出 Token</span><strong id="overview-output-tokens">0</strong><small>官方记录汇总</small></article>
               <article class="overview-stat tone-purple"><span>缓存读取</span><strong id="overview-cache-read-tokens">0</strong><small>命中缓存的输入</small></article>
               <article class="overview-stat tone-cyan"><span>缓存写入</span><strong id="overview-cache-write-tokens">0</strong><small>新建缓存的输入</small></article>
             </div>
-
+            <div class="overview-insights">
+              <section class="panel"><div class="panel-heading"><div><p class="eyebrow">TOKEN MIX</p><h2>Token 构成</h2></div><button id="overview-open-usage" class="button button-text" type="button">查看明细 →</button></div><div id="overview-token-mix" class="token-mix"></div><p class="panel-note">按当前汇总字段展示，不代表计费占比或缓存命中率。</p></section>
+              <section class="panel"><div class="panel-heading"><div><p class="eyebrow">WORKSPACE STATUS</p><h2>工作区状态</h2></div></div><div id="overview-workspace" class="workspace-status"></div><div class="console-quick-actions"><button id="overview-open-keys" class="button button-secondary" type="button">管理密钥</button><button id="overview-open-health" class="button button-secondary" type="button">查看模型健康</button></div></section>
+            </div>
           </section>
 
           <section id="activity-view" class="view-panel" hidden>
@@ -75,7 +85,7 @@
               <div>
                 <p class="eyebrow">MEMBERSHIP & REFERRAL</p>
                 <h1>邀请活动</h1>
-                <p class="page-description">查看当前账号的会员进度，生成或兑换邀请码。</p>
+                <p class="page-description">分享新版 Go 套餐邀请链接，查看购买进度或兑换授权码。重置卡请前往账号池管理。</p>
               </div>
             </div>
 
@@ -88,12 +98,12 @@
               <div class="dashboard-grid activity-grid">
                 <section class="panel activity-panel">
                   <div class="panel-heading">
-                    <div><p class="eyebrow">LATEST ACTIVITY</p><h2>会员邀请活动</h2></div>
+                    <div><p class="eyebrow">GO CAMPAIGN</p><h2>Go 套餐邀请活动</h2></div>
                     <span id="activity-state" class="badge">读取中</span>
                   </div>
                   <div id="membership-summary" class="membership-summary"></div>
                   <div class="progress-block">
-                    <div class="progress-labels"><span>已兑换 <strong id="redeemed-count">-</strong></span><span id="remaining-count">-</span></div>
+                    <div class="progress-labels"><span>已购买 <strong id="redeemed-count">-</strong></span><span id="remaining-count">-</span></div>
                     <div class="progress-track" aria-label="邀请进度"><div id="progress-value" class="progress-value"></div></div>
                     <p id="progress-copy" class="panel-note"></p>
                   </div>
@@ -101,12 +111,14 @@
 
                 <section class="panel invite-panel">
                   <div class="panel-heading compact">
-                    <div><p class="eyebrow">REFERRAL CODE</p><h2>我的邀请码</h2></div>
-                    <button id="create-code" class="button button-secondary" type="button">生成</button>
+                    <div><p class="eyebrow">INVITE LINK</p><h2>我的邀请链接</h2></div>
+                    <button id="create-code" class="button button-secondary" type="button">刷新链接</button>
                   </div>
-                  <div class="code-row"><output id="invite-code" class="invite-code">尚未生成</output><button id="copy-code" class="button button-secondary" type="button" disabled>复制</button></div>
+                  <div class="code-row"><output id="invite-code" class="invite-code">暂无邀请链接</output><button id="copy-code" class="button button-secondary" type="button" disabled>复制链接</button></div>
                   <p id="invite-copy" class="panel-note"></p>
                 </section>
+
+
 
                 <section class="panel redeem-panel">
                   <div class="panel-heading compact"><div><p class="eyebrow">REDEEM</p><h2>兑换邀请码 / 授权码</h2></div></div>
@@ -127,22 +139,40 @@
             <div class="page-heading">
               <div><p class="eyebrow">OPENAI AUTHENTICATION</p><h1>API 密钥</h1><p class="page-description">创建、复制或吊销访问 OpenAI 兼容接口的密钥。</p></div>
             </div>
+            <div id="api-key-summary" class="console-metrics" aria-label="密钥统计"></div>
             <section class="panel api-key-panel" aria-labelledby="api-key-title">
-              <div class="panel-heading compact"><div><p class="eyebrow">API KEY MANAGEMENT</p><h2 id="api-key-title">OpenAI API Key</h2></div></div>
-              <form id="api-key-form" class="api-key-form"><label class="sr-only" for="api-key-name">密钥名称</label><input id="api-key-name" name="name" maxlength="64" placeholder="密钥名称，例如本机开发"><button class="button button-primary" type="submit">生成密钥</button></form>
-              <div id="api-key-reveal" class="api-key-reveal" hidden><code id="api-key-value" class="api-key-value"></code><button id="copy-api-key" class="button button-secondary" type="button" aria-label="复制完整 API 密钥">复制完整密钥</button></div>
-              <p class="panel-note">新密钥仅在生成时显示一次。所有 OpenAI 兼容请求均须使用它。</p>
-              <div class="table-wrap api-key-table-wrap"><table class="api-key-table"><thead><tr><th>名称</th><th>密钥前缀</th><th>创建时间</th><th>最近使用</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="api-key-list"></tbody></table></div>
+              <div class="panel-heading compact"><div><p class="eyebrow">CREATE A KEY</p><h2 id="api-key-title">为每个应用创建独立密钥</h2></div><span class="table-status neutral">敏感凭据</span></div>
+              <form id="api-key-form" class="api-key-form"><label class="sr-only" for="api-key-name">密钥名称</label><input id="api-key-name" name="name" maxlength="64" autocomplete="off" placeholder="用途名称，例如生产服务 / 本机开发"><button class="button button-primary" type="submit">生成密钥</button></form>
+              <div id="api-key-reveal" class="api-key-reveal" hidden><code id="api-key-value" class="api-key-value"></code><button id="copy-api-key" class="button button-secondary" type="button" aria-label="复制完整 API 密钥">复制完整密钥</button><button id="dismiss-api-key" class="button button-text" type="button">隐藏密钥</button></div>
+              <p class="panel-note">生成后请立即安全保存。标记「可复制」的密钥支持再次复制；其余密钥无法恢复。请勿放入前端代码或分享截图。</p>
+            </section>
+            <section class="pool-section console-list" aria-label="密钥列表">
+              <div class="console-filters"><label class="console-search"><span>搜索密钥</span><input id="api-key-search" type="search" placeholder="名称或密钥前缀" autocomplete="off"></label><label><span>使用状态</span><select id="api-key-status"><option value="all">全部密钥</option><option value="used">已使用</option><option value="unused">尚未使用</option></select></label><label><span>排列方式</span><select id="api-key-sort"><option value="newest">最新创建优先</option><option value="used">最近使用优先</option><option value="name">名称排序</option></select></label><button id="api-key-reset" class="button button-secondary" type="button">重置筛选</button></div>
+              <div class="table-wrap console-table-scroll" tabindex="0" role="region" aria-label="密钥列表，可横向滚动"><table class="api-key-table"><thead><tr><th>名称 / 状态</th><th>密钥前缀</th><th>创建时间</th><th>最近使用</th><th>操作</th></tr></thead><tbody id="api-key-list"></tbody></table></div>
+              <div class="console-list-footer"><span id="api-key-page-summary" class="section-hint" role="status"></span><div class="console-page-buttons"><button id="api-key-page-prev" class="button button-secondary" type="button" aria-label="密钥上一页">上一页</button><button id="api-key-page-next" class="button button-secondary" type="button" aria-label="密钥下一页">下一页</button></div></div>
             </section>
           </section>
 
           <section id="account-pool-view" class="view-panel" hidden>
             <div class="page-heading">
-              <div><p class="eyebrow">ROUND ROBIN POOL</p><h1>账号池</h1><p class="page-description">查看每个账号的账户类型、邀请名额和中转健康度。</p></div>
-              <div class="health-actions account-transfer-actions"><span class="section-hint">按优先级轮询，同级内轮流</span><input id="import-accounts-file" type="file" accept="application/json,.json" hidden><button id="import-accounts" class="button button-secondary" type="button">导入账号</button><button id="export-accounts" class="button button-secondary" type="button">导出账号</button><button id="restore-accounts" class="button button-secondary" type="button">恢复本地账户</button></div>
+              <div><p class="eyebrow">ACCOUNT POOL</p><h1>账号池</h1><p class="page-description">管理账号、查看额度，勾选后批量操作。</p></div>
+              <div class="health-actions account-transfer-actions"><input id="import-accounts-file" type="file" accept="application/json,.json" hidden><button id="import-accounts" class="button button-secondary" type="button">导入账号</button><button id="export-accounts" class="button button-secondary" type="button">导出账号</button><details class="pool-more-actions"><summary class="button button-secondary">更多操作 <span aria-hidden="true">⌄</span></summary><div class="pool-more-menu"><button id="recover-accounts" class="button button-text" type="button">解除全部冷却</button><button id="restore-accounts" class="button button-text" type="button">恢复本地账户</button></div></details></div>
             </div>
+            <section class="pool-capacity" aria-label="池子余量与轮询策略">
+              <div id="pool-capacity" class="capacity-cards"></div>
+              <article class="capacity-card capacity-rotation">
+                <label class="capacity-label" for="rotation-mode">轮询模式</label>
+                <select id="rotation-mode" class="rotation-mode-select">
+                  <option value="spread">均摊 · 余额多的先上</option>
+                  <option value="waterfall">榨干 · 快用完的先上</option>
+                  <option value="roundRobin">纯轮流 · 不看额度</option>
+                </select>
+                <small id="rotation-mode-hint">所有模式均先遵守优先级，同一会话优先复用仍符合条件的账号。</small>
+              </article>
+            </section>
+            <div id="pool-status-summary" class="pool-status-summary" role="group" aria-label="按账号状态筛选"></div>
             <section class="pool-section">
-              <div class="pool-toolbar">
+              <div class="pool-toolbar account-pool-toolbar">
                 <div class="pool-filters">
                   <label class="sr-only" for="pool-search">搜索账户</label>
                   <input id="pool-search" type="search" autocomplete="off" placeholder="搜索账户、邮箱或 ID">
@@ -155,43 +185,77 @@
                     <option value="member">其他会员</option>
                     <option value="logged-out">未登录</option>
                   </select>
-                </div>
-                <div class="pool-pagination" aria-label="账户分页">
-                  <span id="pool-page-summary" class="section-hint"></span>
-                  <button id="pool-page-prev" class="button button-secondary" type="button" aria-label="上一页">上一页</button>
-                  <button id="pool-page-next" class="button button-secondary" type="button" aria-label="下一页">下一页</button>
+                  <label class="sr-only" for="pool-sort">排序方式</label>
+                  <select id="pool-sort" aria-label="排序方式">
+                    <option value="default">默认顺序</option>
+                    <option value="remaining-asc">余量最少优先</option>
+                    <option value="remaining-desc">余量最多优先</option>
+                    <option value="reset">最快重置优先</option>
+                    <option value="requests">请求数最多优先</option>
+                    <option value="priority">优先级最高优先</option>
+                    <option value="expiry">订阅最快到期</option>
+                  </select>
+                  <button id="pool-reset" class="button button-secondary" type="button">重置筛选</button>
                 </div>
               </div>
-              <div class="table-wrap"><table class="pool-table"><thead><tr><th>账号</th><th>账户类型</th><th>邀请活动</th><th>额度</th><th>轮询优先级</th><th>中转状态</th><th>最近响应</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="pool-body"></tbody></table></div>
+              <p id="pool-selection-warning" class="pool-selection-warning" role="status" hidden></p>
+              <div class="pool-bulk-toolbar" aria-label="账号批量操作">
+                <label class="pool-select-page"><input id="pool-select-page" type="checkbox">选择本页</label>
+                <span id="pool-selection-count" class="section-hint" role="status">已选 0 个账号</span>
+                <button id="pool-select-filtered" class="button button-text" type="button">选择全部筛选结果</button>
+                <button id="pool-clear-selection" class="button button-text" type="button">清空选择</button>
+                <div class="pool-bulk-actions"><button id="pool-bulk-disable" class="button button-secondary" type="button" disabled>批量停用</button><button id="pool-bulk-recover" class="button button-secondary" type="button" disabled>批量恢复</button><button id="pool-bulk-delete" class="button button-secondary pool-danger" type="button" disabled>批量删除</button></div>
+              </div>
+              <div class="pool-display-note"><span id="pool-filter-summary" class="section-hint">全部账号</span><span class="section-hint">选择跨页保留</span></div>
+              <div class="table-wrap pool-scroll" tabindex="0" aria-label="账号池明细"><table class="pool-table"><thead><tr><th scope="col">账号</th><th scope="col">账户类型</th><th scope="col">邀请活动</th><th scope="col">重置卡</th><th scope="col">额度窗口</th><th scope="col">轮询优先级</th><th scope="col">中转状态</th><th scope="col">最近响应</th><th scope="col">管理操作</th></tr></thead><tbody id="pool-body"></tbody></table></div>
+              <div class="pool-list-footer"><span class="section-hint">每页 10 个账号</span><div class="pool-pagination" aria-label="账户分页"><span id="pool-page-summary" class="section-hint"></span><button id="pool-page-prev" class="button button-secondary" type="button" aria-label="上一页">上一页</button><button id="pool-page-next" class="button button-secondary" type="button" aria-label="下一页">下一页</button></div></div>
             </section>
           </section>
 
           <section id="model-health-view" class="view-panel" hidden>
             <div class="page-heading">
-              <div><p class="eyebrow">UPSTREAM MODEL PROBES</p><h1>模型健康</h1><p class="page-description">单个模型可即时检测；定时任务每次只轮转检测一个模型。</p></div>
+              <div><p class="eyebrow">MODEL PROBES</p><h1>模型健康</h1><p class="page-description">从当前可用账号读取模型目录和可用额度；每个模型只保留一条检测结果，不会发送生成请求或消耗模型调用。</p></div>
               <div class="health-actions"><span id="model-health-updated" class="updated-at">正在读取模型目录</span><button id="model-health-discover" class="button button-secondary" type="button">刷新模型</button></div>
             </div>
-            <div id="model-health-summary" class="health-summary" aria-live="polite"></div>
+            <div id="model-health-summary" class="console-metrics" aria-label="模型健康统计"></div>
+            <p id="model-health-error" class="console-inline-error" role="status" hidden></p>
+            <p class="console-info-note">状态来自目录与额度检查，不等同于实际生成成功率；所有模型（含 Claude）只做额度检查，不发送生成请求、不消耗模型调用。耗时是检查接口耗时，不是模型首字延迟。503 表示上游不可用。页面每 5 秒同步结果。</p>
             <section class="pool-section">
-              <div class="table-wrap"><table class="model-health-table"><thead><tr><th>模型</th><th>状态</th><th>响应耗时</th><th>HTTP</th><th>检测时间</th><th>结果</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="model-health-body"></tbody></table></div>
+              <div class="console-filters"><label class="console-search"><span>搜索模型</span><input id="model-health-search" type="search" placeholder="模型 ID 或检测结果" autocomplete="off"></label><label><span>检测状态</span><select id="model-health-status"><option value="all">全部状态</option><option value="healthy">可用</option><option value="limited">限流</option><option value="issues">不可用 / 授权异常</option><option value="pending">待检测</option><option value="checking">检测中</option></select></label><label><span>排列方式</span><select id="model-health-sort"><option value="attention">异常优先</option><option value="name">模型名称</option><option value="latency">检查耗时最短</option><option value="checked">最近检测优先</option></select></label><button id="model-health-reset" class="button button-secondary" type="button">重置筛选</button></div>
+              <div class="table-wrap console-table-scroll" tabindex="0" role="region" aria-label="模型健康列表，可横向滚动"><table class="model-health-table"><thead><tr><th>模型</th><th>状态</th><th>检查耗时</th><th>HTTP</th><th>检测时间</th><th>结果</th><th>操作</th></tr></thead><tbody id="model-health-body"></tbody></table></div>
+              <div class="console-list-footer"><span id="model-health-page-summary" class="section-hint" role="status"></span><div class="console-page-buttons"><button id="model-health-page-prev" class="button button-secondary" type="button" aria-label="模型上一页">上一页</button><button id="model-health-page-next" class="button button-secondary" type="button" aria-label="模型下一页">下一页</button></div></div>
             </section>
           </section>
 
           <section id="usage-log-view" class="view-panel" hidden>
             <div class="page-heading">
-              <div><p class="eyebrow">REQUEST LOG</p><h1>使用明细</h1><p class="page-description">请求完成后显示账号、模型、token 用量和响应耗时（保留最近 500 条，重启后清空）。</p></div>
-              <div class="health-actions"><span id="usage-log-updated" class="updated-at">正在读取使用明细</span></div>
+              <div><p class="eyebrow">REQUEST LOG</p><h1>使用明细</h1><p class="page-description">实时追踪请求、思考状态和 Token 用量。保留最近 500 条，重启后清空；统计仅针对当前筛选结果。</p></div>
+              <div class="usage-log-actions"><button id="usage-log-pause" class="button button-secondary" type="button" aria-pressed="false">暂停刷新</button><button id="usage-log-refresh" class="button button-secondary" type="button">立即刷新</button></div>
             </div>
+            <div class="usage-log-update"><span id="usage-log-updated" class="updated-at" role="status">正在读取使用明细</span><span class="section-hint">每 5 秒刷新 · 不记录请求正文或思考内容</span></div>
+            <div id="usage-log-summary" class="usage-log-summary" aria-label="当前筛选统计"></div>
             <section class="pool-section">
-              <div class="pool-toolbar">
-                <div class="pool-filters"><span class="section-hint">按时间倒序排列</span></div>
+              <div class="usage-log-filters">
+                <label class="usage-log-search"><span>搜索请求</span><input id="usage-log-search" type="search" placeholder="模型、账号、请求 ID 或错误码" autocomplete="off"></label>
+                <label><span>请求状态</span><select id="usage-log-status"><option value="all">全部状态</option><option value="pending">进行中</option><option value="success">成功</option><option value="failed">失败</option><option value="incomplete">未完整结束</option><option value="cancelled">已取消 / 断开</option></select></label>
+                <label><span>API 密钥</span><select id="usage-log-api-key"><option value="all">全部密钥</option></select></label>
+                <label><span>客户端协议</span><select id="usage-log-protocol"><option value="all">全部协议</option><option value="OpenAI Chat">OpenAI Chat</option><option value="OpenAI Responses">OpenAI Responses</option><option value="Anthropic">Anthropic</option><option value="OpenAI Images">OpenAI Images</option><option value="OpenAI Search">OpenAI Search</option><option value="OpenAI Compact">OpenAI Compact（历史记录）</option><option value="未知协议">未知协议</option></select></label>
+                <label><span>排列方式</span><select id="usage-log-sort"><option value="newest">最新请求优先</option><option value="duration">耗时最长优先</option><option value="tokens">输出 Token 最多</option></select></label>
+                <button id="usage-log-reset" class="button button-secondary" type="button">重置筛选</button>
+              </div>
+              <section id="usage-log-detail" class="usage-log-detail" aria-labelledby="usage-log-detail-title" hidden>
+                <div class="usage-detail-heading"><div><p class="eyebrow">REQUEST DETAILS</p><h2 id="usage-log-detail-title" tabindex="-1">请求详情</h2></div><button id="usage-log-detail-close" class="button button-secondary" type="button">关闭详情</button></div>
+                <div id="usage-log-detail-body"></div>
+              </section>
+              <div class="pool-toolbar usage-log-pagination">
+                <span id="usage-log-filter-summary" class="section-hint">全部请求</span>
                 <div class="pool-pagination" aria-label="使用明细分页">
                   <span id="usage-log-page-summary" class="section-hint"></span>
                   <button id="usage-log-page-prev" class="button button-secondary" type="button" aria-label="上一页">上一页</button>
                   <button id="usage-log-page-next" class="button button-secondary" type="button" aria-label="下一页">下一页</button>
                 </div>
               </div>
-              <div class="table-wrap"><table class="usage-log-table"><thead><tr><th>完成时间</th><th>账号</th><th>模型</th><th>协议</th><th>思考等级</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>首字</th><th>总耗时</th><th>状态</th></tr></thead><tbody id="usage-log-body"></tbody></table></div>
+              <div class="table-wrap usage-log-scroll" tabindex="0" aria-label="请求明细，可横向滚动"><table class="usage-log-table"><thead><tr><th scope="col">请求时间</th><th scope="col">模型 / 思考参数</th><th scope="col">账号</th><th scope="col">API 密钥</th><th scope="col">客户端协议</th><th scope="col">Token 用量</th><th scope="col">缓存 Token</th><th scope="col" title="首字节为收到上游首个数据块的时间，不等于首个可见文字">响应耗时</th><th scope="col">状态 / 详情</th></tr></thead><tbody id="usage-log-body"></tbody></table></div>
             </section>
           </section>
         </main>

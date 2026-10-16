@@ -1,6 +1,43 @@
+# ---- Secrets & credentials: never commit ----
 .env
+.env.*
+!.env.example
+# Mirasim login profiles (contain setting.json with access/refresh tokens)
 .mirasim/
-.runtime/
 profiles/
-.DS_Store
+setting.json
+api-keys.json
+web-password
+web-cookie.txt
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ---- Local runtime data: accounts, hashed/encrypted API keys, request logs ----
+.runtime/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.db
+*.log
+*.pid
+backups/
+
+# ---- Downloaded official artifacts & archives ----
+*.dmg
+*.zip
+*.tar.gz
+
+# ---- Tooling / OS / editor ----
+node_modules/
 coverage/
+.DS_Store
+.claude/
+.idea/
+.vscode/
+
+# Scratch probes a workflow agent may drop in the test directory; `node --test` would run them.
+test/_*.mjs
+test/zz-*.test.js

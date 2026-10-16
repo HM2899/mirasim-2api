@@ -1,7 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 const COOKIE_NAME = "mirasim_console_session";
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_RENEW_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export class WebAuth {
   #usernameHash;
@@ -18,13 +19,22 @@ export class WebAuth {
     this.#passwordHash = digest(config.password);
   }
 
-  isAuthenticated(request) {
+  isAuthenticated(request, response = null) {
     this.#pruneExpired();
     const sessionId = parseCookies(request.headers.cookie || "")[COOKIE_NAME];
     if (!sessionId) return false;
-    if (this.database) return this.database.hasWebSession(sessionId, this.now());
-    const session = this.#sessions.get(sessionId);
-    return Boolean(session && session.expiresAt > this.now());
+    const now = this.now();
+    const expiresAt = this.database
+      ? this.database.webSessionExpiresAt(sessionId, now)
+      : this.#sessions.get(sessionId)?.expiresAt;
+    if (!(expiresAt > now)) return false;
+    if (response && expiresAt - now <= SESSION_TTL_MS - SESSION_RENEW_INTERVAL_MS) {
+      const renewedExpiresAt = now + SESSION_TTL_MS;
+      if (this.database) this.database.saveWebSession(sessionId, renewedExpiresAt);
+      else this.#sessions.set(sessionId, { expiresAt: renewedExpiresAt });
+      response.setHeader("Set-Cookie", sessionCookie(sessionId, this.secureCookie));
+    }
+    return true;
   }
 
   login(username, password) {

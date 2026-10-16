@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { createGateway } from "./server.js";
+import { bundledCliEnvironment } from "./mirasim-release.js";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const mirasimServer = resolve(projectDir, "vendor", "mirasim-server.cjs");
@@ -12,7 +13,7 @@ const [command = "serve", provider] = process.argv.slice(2);
 if (command === "login" || command === "relay") {
   if (!existsSync(mirasimServer)) throw new Error(`Missing ${mirasimServer}`);
   const args = [mirasimServer, command, ...(provider ? [provider] : [])];
-  const child = spawn(process.execPath, args, { stdio: "inherit", env: process.env });
+  const child = spawn(process.execPath, args, { stdio: "inherit", env: bundledCliEnvironment() });
   child.once("exit", (code, signal) => {
     process.exitCode = code ?? (signal ? 1 : 0);
   });
@@ -23,7 +24,8 @@ if (command === "login" || command === "relay") {
     server.startModelHealth();
     console.log(`mirasim-2api listening on http://${config.host}:${config.port}`);
     if (config.webAuth.generatedPassword) {
-      console.log(`Web console login: ${config.webAuth.username} / ${config.webAuth.password}`);
+      if (process.stdout.isTTY) console.log(`Web console login: ${config.webAuth.username} / ${config.webAuth.password}`);
+      else console.log("The generated Web console password is not written to service logs. Configure WEB_AUTH_PASSWORD to sign in.");
       console.log("Set WEB_AUTH_PASSWORD before the next start to keep a fixed Web console password.");
     }
   });

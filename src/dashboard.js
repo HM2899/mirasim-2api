@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-import { PRIORITY_RANGE, hasRelayQuota, normalizePriority, readProfile, tokenClaims } from "./pool.js";
+import { createHash, randomUUID } from "node:crypto";
+import { PRIORITY_RANGE, ROTATION_MODES, hasRelayQuota, normalizePriority, readProfile, tokenClaims, usedPercentOf } from "./pool.js";
 import { MoeMailClient } from "./moemail.js";
 import { saveRefreshedAuth } from "./session-refresh.js";
+import { MIRASIM_CLIENT_VERSION } from "./mirasim-release.js";
+import { normalizeCampaignLink, normalizeResetCards, RESET_OUTCOMES, resetWindows } from "./account-features.js";
 
 const AUTH_TIMEOUT_MS = 12_000;
 const LOGIN_TIMEOUT_MS = 45_000;
@@ -12,9 +14,7 @@ const MAX_MOEMAIL_BATCH_SIZE = 5;
 const MAX_ACCOUNT_IMPORT_SIZE = 100;
 const LICENSE_CODE_PREFIX = "MLIC";
 const LICENSE_VERDICTS = new Set(["redeemable", "already_redeemed", "blocked_lower_tier"]);
-// Mirasim's own plan ladder: none < basic < plus < max, with enterprise sharing the top tier.
-const PLAN_RANKS = { none: 0, free: 0, basic: 1, plus: 2, max: 3, enterprise: 3, internal: 3 };
-const PLAN_LABELS = { none: "FREE", free: "FREE", basic: "MAX 2X", plus: "MAX 10X", max: "MAX 40X", enterprise: "企业版", internal: "内部账号" };
+const PLAN_LABELS = { none: "FREE", free: "FREE", go: "Go", basic: "MAX 2X", plus: "MAX 10X", max: "MAX 40X", enterprise: "企业版", internal: "内部账号" };
 // Mirasim answers a suspended activity with a plain English detail; the console speaks Chinese.
 const UPSTREAM_DETAILS = new Map([
   ["invite code creation is paused", "官方已暂停生成新的邀请码，请稍后再试。"],
@@ -28,11 +28,16 @@ export class RelayUsageLedger {
     this.database = database;
   }
 
-  record(profile, upstream) {
+  // `congested` marks a 503 the relay refused out of its own capacity rather than anything this
+  // account did. Without it the console reads a relay-wide spell as sixty-seven broken accounts:
+  // every one of them shows a red 503 as its last response while all of them are in fact healthy,
+  // available, and serving the very next request.
+  record(profile, upstream, { congested = false } = {}) {
     const entry = this.#entry(profile.home);
     entry.requests += 1;
     entry.lastAt = new Date().toISOString();
     entry.lastStatus = upstream.status;
+    entry.lastCongested = congested;
     const callId = upstream.headers?.get?.("x-litellm-call-id");
     if (callId && !entry.calls.some((call) => call.id === callId)) {
       entry.calls.push({ id: callId, at: entry.lastAt });
@@ -46,6 +51,7 @@ export class RelayUsageLedger {
     entry.failures += 1;
     entry.lastAt = new Date().toISOString();
     entry.lastStatus = 0;
+    entry.lastCongested = false;
     this.#persist(profile.home, entry);
   }
 
@@ -56,6 +62,7 @@ export class RelayUsageLedger {
       failures: entry.failures,
       lastAt: entry.lastAt,
       lastStatus: entry.lastStatus,
+      lastCongested: Boolean(entry.lastCongested),
       inputTokens: entry.inputTokens,
       outputTokens: entry.outputTokens,
       cacheReadTokens: entry.cacheReadTokens,
@@ -116,13 +123,16 @@ export class RelayUsageLedger {
 }
 
 export class MirasimDashboard {
-  constructor(config, pool, usage, { fetchImpl = fetch, database = null, moemail = null, sessionRefresher = null } = {}) {
+  #quotaRefreshes = new Map();
+
+  constructor(config, pool, usage, { fetchImpl = fetch, database = null, moemail = null, sessionRefresher = null, relaySessions = null } = {}) {
     this.config = config;
     this.pool = pool;
     this.usage = usage;
     this.fetchImpl = fetchImpl;
     this.database = database;
     this.sessionRefresher = sessionRefresher;
+    this.relaySessions = relaySessions;
     const savedMoeMail = database?.getMoeMailConfig(config.webAuth?.password);
     const configuredByEnvironment = Boolean(config.moemail?.url || config.moemail?.apiKey || config.moemail?.domain);
     if (!configuredByEnvironment && savedMoeMail) this.config.moemail = { ...config.moemail, ...savedMoeMail };
@@ -130,7 +140,7 @@ export class MirasimDashboard {
   }
 
   async snapshot() {
-    await this.sessionRefresher?.refreshAll(this.config.homes);
+    this.sessionRefresher?.refreshInBackground(this.config.homes);
     const statuses = new Map(this.pool.status().map((status) => [status.home, status]));
     const accounts = await Promise.all(this.config.homes.map(async (home, index) => {
       const status = statuses.get(home);
@@ -138,6 +148,7 @@ export class MirasimDashboard {
       const usage = this.usage.snapshot(home);
       const account = {
         key: accountKey(index),
+        selectionId: createHash("sha256").update(home).digest("hex"),
         id: profile?.id || status?.id || `account-${index + 1}`,
         loggedIn: Boolean(profile),
         healthy: Boolean(status?.healthy),
@@ -147,6 +158,8 @@ export class MirasimDashboard {
         priorityOverride: status?.priorityOverride ?? null,
         identity: null,
         referral: null,
+        campaign: null,
+        resetCards: null,
         quota: usageSummary(usage, status)
       };
       if (!profile) return account;
@@ -156,21 +169,35 @@ export class MirasimDashboard {
       const identity = await this.#identity(profile);
       const planned = this.pool.profile(home) || profile;
       const planStatus = this.pool.status().find((item) => item.home === home) || status;
-      const [referral, quota, limits] = await Promise.all([
-        this.#referral(profile),
+      const [quotaResult, limitsResult, campaignResult, resetCardsResult] = await Promise.allSettled([
         this.#usage(planned, usage),
         // A free account's limit windows advertise a budget the relay refuses to honour, so the
         // console is not given numbers that look like usable quota.
-        hasRelayQuota(planned) ? this.#limits(profile) : null
+        hasRelayQuota(planned) ? this.#limits(readProfile(home) || profile) : null,
+        this.campaignLink(account.key),
+        this.resetCards(account.key)
       ]);
+      const quota = quotaResult.status === "fulfilled" ? quotaResult.value : usageSummary(usage, planStatus);
+      const limits = limitsResult.status === "fulfilled" ? limitsResult.value : null;
+      const syncWarnings = [["campaign", campaignResult], ["usage", quotaResult], ["limits", limitsResult]]
+        .filter(([, result]) => result.status === "rejected")
+        .map(([field, result]) => snapshotWarning(field, result.reason));
+      // The rotation otherwise learns an account's quota only from traffic it has already sent
+      // that account, so an account nothing has touched since startup reads as untouched. This
+      // reading costs nothing extra — the console is already fetching it — and it reaches the
+      // rotation before a request has to be spent discovering the same thing.
+      const windows = normalizeLimitWindows(limits);
+      if (limitsResult.status === "fulfilled") this.pool.observeLimits(home, windows);
       return {
         ...account,
         healthy: Boolean(planStatus?.healthy),
         priority: planStatus?.priority ?? null,
         priorityOverride: planStatus?.priorityOverride ?? null,
         identity,
-        referral,
-        quota: { ...quota, windows: normalizeLimitWindows(limits) }
+        campaign: campaignResult.status === "fulfilled" ? campaignResult.value : null,
+        resetCards: resetCardsResult.status === "fulfilled" ? resetCardsResult.value : null,
+        syncWarnings,
+        quota: { ...quota, ...limitSummary(windows) }
       };
     }));
 
@@ -181,19 +208,60 @@ export class MirasimDashboard {
     };
   }
 
-  // The desktop client always POSTs and shows the returned referral. Mirasim can pause creation
-  // while still serving an already issued code, so a refused create falls back to reading it.
-  async createReferral(key) {
+  async campaignLink(key) {
     const profile = this.#profileForKey(key);
-    const response = await this.#request("/auth/referral", profile.token, { method: "POST" });
-    const created = response.ok ? normalizeReferral(response.data) : null;
-    if (created?.code) return created;
-
-    const existing = await this.#referral(profile);
-    if (existing?.code) return existing;
-    if (!response.ok) throw upstreamError(response.status, "无法创建邀请码", response.data);
-    return existing || created;
+    const response = await this.#request("/v1/pay/campaign/my-link", profile.token);
+    return response.ok ? normalizeCampaignLink(response.data) : null;
   }
+
+  async resetCards(key) {
+    const response = await this.#accountBearerRequest(key, "/v1/reset-cards", "GET", 8000);
+    if (!response.ok) throw upstreamError(response.status, "暂时无法读取重置卡", response.data);
+    const snapshot = normalizeResetCards(response.data);
+    if (!snapshot) throw httpError(502, "重置卡接口返回的数据不完整。");
+    return snapshot;
+  }
+
+  async redeemResetCard(key, cardId, selectionId = null) {
+    if (typeof cardId !== "string" || !cardId.trim() || cardId.length > 256) throw httpError(400, "请选择有效的重置卡。");
+    const home = this.#homeForKey(key);
+    if (selectionId !== null && selectionId !== createHash("sha256").update(home).digest("hex")) throw httpError(409, "账号列表已变化，请刷新后重新选择重置卡。");
+    const response = await this.#accountBearerRequest(key, `/v1/reset-cards/${encodeURIComponent(cardId)}/redeem`, "POST", 20000);
+    if (!response.ok) throw upstreamError(response.status, "重置卡使用结果未确认，请刷新列表核对后再操作", response.data);
+    if (!RESET_OUTCOMES.has(response.data?.outcome)) throw httpError(502, "重置卡使用结果未确认，请刷新列表核对后再操作。");
+    if (response.data.outcome === "reset") {
+      this.pool.recover(home);
+      this.pool.observeLimits(home, resetWindows(response.data.windows).map((name) => ({ name, usedPercent: 0, resetAt: null })));
+    }
+    return { outcome: response.data.outcome, windows: resetWindows(response.data.windows), cards: normalizeResetCards(response.data) };
+  }
+
+  async #accountBearerRequest(key, path, method, timeoutMs, baseUrl = this.config.relayUrl, body = undefined) {
+    const profile = this.#profileForKey(key);
+    const send = (token) => this.#authenticatedRequest(baseUrl, `${baseUrl.replace(/\/+$/, "")}${path}`, token, {
+      method, timeoutMs, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      authenticatedHeaders: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }
+    });
+    let response = await send(profile.token);
+    if (response.status === 401 && method === "GET" && (readProfile(profile.home)?.token !== profile.token || await this.#refreshQuotaCredentials(profile))) {
+      const refreshed = readProfile(profile.home);
+      if (refreshed?.token && refreshed.token !== profile.token) response = await send(refreshed.token);
+    }
+    return response;
+  }
+
+  async #refreshQuotaCredentials(profile) {
+    if (typeof this.sessionRefresher?.refreshNow !== "function") return false;
+    const previous = this.#quotaRefreshes.get(profile.home);
+    if (previous?.pending) return previous.pending;
+    if (previous && Date.now() - previous.at < 300_000) return false;
+    const record = { at: Date.now(), pending: null };
+    this.#quotaRefreshes.set(profile.home, record);
+    record.pending = Promise.resolve().then(() => this.sessionRefresher.refreshNow(profile.home)).then(Boolean, () => false);
+    try { return await record.pending; }
+    finally { record.pending = null; }
+  }
+
 
   async requestLoginCode(key, email) {
     const normalizedEmail = normalizeEmail(email);
@@ -212,6 +280,38 @@ export class MirasimDashboard {
     const home = this.#homeForKey(key);
     if (!this.database) throw httpError(501, "当前账户池未启用持久化存储。");
     this.#removeHome(home);
+  }
+
+  bulkAccounts(action, accounts) {
+    if (!["disable", "recover", "delete"].includes(action) || !Array.isArray(accounts) || !accounts.length || accounts.length > 1000) {
+      throw httpError(400, "请选择 1–1000 个账号及有效的批量操作。");
+    }
+    if (action === "delete" && !this.database) throw httpError(501, "当前账户池未启用持久化存储。");
+    const seen = new Set();
+    const targets = accounts.map((account) => {
+      if (typeof account?.key !== "string" || typeof account?.selectionId !== "string") throw httpError(400, "账号选择参数无效。");
+      const home = this.#homeForKey(account?.key);
+      const selectionId = createHash("sha256").update(home).digest("hex");
+      if (account?.selectionId !== selectionId || seen.has(home)) throw httpError(409, "账号列表已变化或存在重复选择，请刷新后重新选择。");
+      seen.add(home);
+      return { key: account.key, home, selectionId };
+    });
+    const results = targets.map(({ key, home, selectionId }) => {
+      try {
+        if (action === "delete") this.#removeHome(home);
+        else if (action === "disable") {
+          this.pool.disable(home);
+          this.database?.setHomeDisabled(home, true);
+        } else {
+          this.pool.enable(home);
+          this.database?.setHomeDisabled(home, false);
+        }
+        return { key, selectionId, ok: true };
+      } catch (error) {
+        return { key, selectionId, ok: false, error: error.message || "操作失败" };
+      }
+    });
+    return { action, results, succeeded: results.filter((result) => result.ok).length, failed: results.filter((result) => !result.ok).length };
   }
 
   async renewAccount(key) {
@@ -246,6 +346,28 @@ export class MirasimDashboard {
     this.pool.enable(home);
     this.database?.setHomeDisabled(home, false);
     return { recovered: true };
+  }
+
+  // What the rotation is doing now, and what else it could be doing — the console renders the
+  // choice from this rather than holding its own copy of the list.
+  rotationMode() {
+    return { mode: this.pool.mode(), modes: [...ROTATION_MODES] };
+  }
+
+  setRotationMode(mode) {
+    if (!this.pool.setMode(mode)) {
+      throw httpError(400, `轮询模式必须是 ${[...ROTATION_MODES].join("、")} 之一。`);
+    }
+    // Stored so a restart keeps it. A pool without persistence still takes the change for as long
+    // as it runs, which is what an operator flipping the mode to watch its effect expects.
+    this.database?.saveRotationMode(this.pool.mode());
+    return this.rotationMode();
+  }
+
+  // Lifts the cooldown from every account that is carrying one. Accounts an operator disabled by
+  // hand are left alone: this undoes what an upstream outage did to the pool, not what a person did.
+  recoverAllAccounts() {
+    return { recovered: this.pool.recoverAll() };
   }
 
   async restoreAccounts() {
@@ -425,44 +547,10 @@ export class MirasimDashboard {
     return this.moeMailSettings();
   }
 
-  // Only a paid account can invite, and its code stops working once its redemptions run out,
-  // so candidates are filtered on both and the highest tier gets to invite first.
   async #registrationInviteCode(inviteCode) {
     const supplied = typeof inviteCode === "string" ? inviteCode.trim() : "";
     if (supplied.length > 128) throw httpError(400, "请输入有效的邀请码或授权码。");
-    if (supplied) return supplied;
-
-    const candidates = [];
-    for (const [index, home] of this.config.homes.entries()) {
-      const profile = readProfile(home);
-      if (!profile) continue;
-      let referral;
-      try {
-        referral = await this.#referral(profile);
-      } catch {
-        // A stale account must not prevent trying another eligible account.
-        continue;
-      }
-      const rank = planRank(referral?.currentPlan || jwtPlan(profile.token));
-      if (rank <= 0) continue;
-      if (referral && !hasInviteCapacity(referral)) continue;
-      candidates.push({ index, rank, referral });
-    }
-    candidates.sort((left, right) => right.rank - left.rank || left.index - right.index);
-
-    const issued = candidates.find((candidate) => candidate.referral?.code);
-    if (issued) return issued.referral.code;
-
-    for (const candidate of candidates) {
-      try {
-        const created = await this.createReferral(accountKey(candidate.index));
-        if (created?.code) return created.code;
-      } catch (error) {
-        // Mirasim pauses creation service-wide, so the remaining accounts cannot help either.
-        if (error?.statusCode === 503) break;
-      }
-    }
-    return "";
+    return supplied;
   }
 
   #addAccount() {
@@ -600,7 +688,7 @@ export class MirasimDashboard {
 
   #homeForKey(key) {
     const index = keyIndex(key);
-    if (index === null || index >= this.config.homes.length) throw httpError(404, "未找到所选账号。");
+    if (index === null || index < 0 || index >= this.config.homes.length) throw httpError(404, "未找到所选账号。");
     return this.config.homes[index];
   }
 
@@ -634,7 +722,7 @@ export class MirasimDashboard {
     const earliest = localUsage.calls[0].at;
     const ids = localUsage.calls.map((call) => encodeURIComponent(call.id)).join(",");
     const query = `?ids=${ids}&from=${encodeURIComponent(earliest)}&to=${encodeURIComponent(new Date().toISOString())}`;
-    const response = await this.#relayRequest(`/usage/calls${query}`, profile.token);
+    const response = await this.#relayRequest(`/usage/calls${query}`, profile);
     if (!response.ok || !Array.isArray(response.data?.calls)) return summary;
 
     const accumulated = this.usage.recordCallUsage(profile.home, response.data.calls);
@@ -642,31 +730,73 @@ export class MirasimDashboard {
   }
 
   async #limits(profile) {
-    const response = await this.#relayRequest("/v1/limits", profile.token);
-    return response.ok ? response.data : null;
+    // x-mirasim-probe marks the read as a metering query rather than traffic, the way the
+    // official client reads its own quota. A 404/405 means this relay has no limits endpoint at
+    // all, which is an absence rather than a failure: nothing to retry and nothing to report.
+    const read = (current) => this.#relayRequest("/v1/limits", current, { headers: { "x-mirasim-probe": "usage" } });
+    let response = await read(profile);
+    if (response.status === 404 || response.status === 405) return null;
+    // A background renewal may have replaced the token after this snapshot read the profile, so a
+    // 401 on the old one is answered with the stored token before any new renewal is spent.
+    if (response.status === 401) {
+      const stored = readProfile(profile.home);
+      if (stored?.token && stored.token !== profile.token) {
+        profile = stored;
+        response = await read(profile);
+        if (response.status === 404 || response.status === 405) return null;
+      }
+    }
+    const valid = (result) => result.ok && Array.isArray(result.data?.windows ?? result.data?.data?.windows);
+    if (!valid(response) && ![403, 429].includes(response.status) && await this.#refreshQuotaCredentials(profile)) {
+      response = await read(readProfile(profile.home) || profile);
+    }
+    if (response.status === 404 || response.status === 405) return null;
+    if (!response.ok) throw upstreamError(response.status, "读取账户额度失败；已按限频策略尝试刷新登录态", response.data);
+    if (!valid(response)) throw httpError(502, "额度数据不完整；刷新登录态不能补充余额或恢复空间权限。");
+    return response.data;
   }
 
   async #request(path, token, options = {}) {
     return this.#authenticatedRequest(this.config.loginUrl, path, token, options);
   }
 
-  async #relayRequest(path, token, options = {}) {
-    return this.#authenticatedRequest(this.config.relayUrl, path, token, options);
+  async #relayRequest(path, profile, options = {}) {
+    const { agent = null, accept = "application/json", headers: meta = {}, ...requestOptions } = options;
+    if (!this.relaySessions) {
+      return this.#authenticatedRequest(this.config.relayUrl, path, profile.token, {
+        ...requestOptions,
+        headers: { Accept: accept, ...(agent ? { "x-mirasim-agent": agent } : {}), ...meta }
+      });
+    }
+    const body = requestOptions.body || "";
+    const headers = await this.relaySessions.headersFor(profile, {
+      method: requestOptions.method || "GET",
+      path,
+      body,
+      accept,
+      contentType: requestOptions.body ? "application/json" : "",
+      agent,
+      meta
+    });
+    return this.#authenticatedRequest(this.config.relayUrl, path, profile.token, { ...requestOptions, authenticatedHeaders: headers });
   }
 
   async #authenticatedRequest(baseUrl, path, token, options = {}) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? AUTH_TIMEOUT_MS);
     try {
       const response = await this.fetchImpl(new URL(path, `${baseUrl}/`), {
         ...options,
-        headers: {
+        headers: options.authenticatedHeaders || {
           Accept: "application/json",
           Authorization: `Bearer ${token}`,
           "x-mirasim-token": token,
-          "x-mirasim-client": this.config.clientVersion || "0.0.239",
+          "x-mirasim-client": this.config.clientVersion || MIRASIM_CLIENT_VERSION,
           "x-mirasim-call": `dashboard-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          ...(options.body ? { "Content-Type": "application/json" } : {})
+          ...(options.body ? { "Content-Type": "application/json" } : {}),
+          // Last, so a caller can add headers of its own — until now they were built and then
+          // silently dropped, because this block replaced options.headers outright.
+          ...options.headers
         },
         signal: controller.signal,
         redirect: "error"
@@ -759,25 +889,58 @@ function invitesNeeded(referral) {
   return referral.reached ? 0 : Math.max(0, referral.threshold - referral.redeemed);
 }
 
-// max_redemptions is how often the code itself may still be redeemed, which is unrelated to
-// the invite threshold; 0 means the upstream did not report a cap.
-function hasInviteCapacity(referral) {
-  return referral.maxRedemptions <= 0 || referral.remaining > 0;
+// The relay reports each window as a pair of absolute numbers — `{ name, used, budget }` — and
+// leaves the percentage to the client. There is no `limit`, `total` or `utilization` field to
+// read, which is why the console had no numbers to show. A window whose budget is not a positive
+// number carries no usable figure and is dropped rather than rendered as 0%, which would read as
+// plenty of quota left.
+function normalizeLimitWindows(data) {
+  const source = data?.windows ?? data?.data?.windows;
+  if (!Array.isArray(source)) return [];
+  return source.flatMap((value) => {
+    const item = value && typeof value === "object" ? value : {};
+    const name = typeof item.name === "string" ? item.name.trim() : "";
+    const budget = Number(item.budget);
+    const used = Number(item.used);
+    if (!name || item.budget === null || item.budget === undefined || item.budget === "" || item.used === null || item.used === undefined || item.used === "" || !Number.isFinite(budget) || budget <= 0 || !Number.isFinite(used) || used < 0) return [];
+    const usedPercent = usedPercentOf(used, budget);
+    return [{
+      name,
+      limit: budget,
+      used,
+      remaining: Math.max(0, budget - used),
+      usedPercent,
+      remainingPercent: Math.max(0, Math.round((100 - usedPercent) * 10) / 10),
+      status: windowStatus(usedPercent),
+      modelScoped: item.model_scoped === true,
+      resetAt: resetAtIso(item.reset_at)
+    }];
+  });
 }
 
-function normalizeLimitWindows(data) {
-  const source = data?.windows || data?.limits || data?.data?.windows || data?.data?.limits;
-  if (!source || typeof source !== "object") return [];
-  const entries = Array.isArray(source) ? source.map((value, index) => [value?.name || value?.window || value?.period || `${value?.hours || index}h`, value]) : Object.entries(source);
-  return entries.map(([name, value]) => {
-    const item = value && typeof value === "object" ? value : {};
-    const limit = Number(item.limit ?? item.total ?? item.max ?? item.quota ?? item.input_limit);
-    const remaining = Number(item.remaining ?? item.left ?? item.available ?? item.remaining_tokens);
-    const used = Number(item.used ?? item.used_tokens ?? item.consumed ?? item.usage);
-    const remainingPercent = Number(item.remainingPercent ?? item.remaining_percentage ?? item.remaining_percent);
-    const utilization = Number(item.utilization ?? item.utilizationPercent ?? item.percentage ?? item.usedPercent);
-    return { name: String(name), limit: Number.isFinite(limit) ? limit : null, remaining: Number.isFinite(remaining) ? remaining : null, used: Number.isFinite(used) ? used : null, remainingPercent: Number.isFinite(remainingPercent) ? remainingPercent : (Number.isFinite(utilization) ? Math.max(0, 100 - utilization) : null), resetAt: item.resetAt || item.reset_at || item.resetsAt || null };
-  });
+// The 80% warning line. The rest of the arithmetic — a tenth of a percent, and 99% up counting as
+// spent — lives with the rotation in pool.js, which decides on the same numbers the console shows.
+function windowStatus(usedPercent) {
+  return usedPercent >= 100 ? "limit_reached" : usedPercent >= 80 ? "warning" : "allowed";
+}
+
+// reset_at is a whole-second epoch; 0 means the window has no scheduled reset.
+function resetAtIso(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : null;
+}
+
+// The account's headline figure is its most binding window, and a model-scoped window is not
+// binding on the account: filling up `7d_fable` only stops fable, while everything else keeps
+// running. So the scoped windows are set aside unless they are all there is — otherwise one
+// exhausted per-model budget would report a perfectly usable account as spent.
+function limitSummary(windows) {
+  if (windows.length === 0) return { windows, limitStatus: null, remainingPercent: null };
+  const unscoped = windows.filter((window) => !window.modelScoped);
+  const binding = unscoped.length > 0 ? unscoped : windows;
+  const limitStatus = binding.some((window) => window.status === "limit_reached") ? "limit_reached"
+    : binding.some((window) => window.status === "warning") ? "warning" : "allowed";
+  return { windows, limitStatus, remainingPercent: Math.min(...binding.map((window) => window.remainingPercent)) };
 }
 
 function subscriptionExpiry(data) {
@@ -800,6 +963,19 @@ function firstValue(...values) {
   return values.find((value) => value !== undefined && value !== null);
 }
 
+const FIELD_LABELS = { campaign: "邀请链接", usage: "用量", limits: "额度窗口" };
+
+function snapshotWarning(field, error) {
+  const upstreamStatus = Number.isInteger(error?.upstreamStatus) ? error.upstreamStatus : 0;
+  const retryAfterMs = Number.isFinite(error?.retryAfterMs) ? Math.max(0, error.retryAfterMs) : 0;
+  const deviceSession = error?.name === "MirasimRelaySessionError";
+  const message = deviceSession
+    ? `上游设备会话暂不可用${upstreamStatus ? `（HTTP ${upstreamStatus}）` : ""}，${upstreamStatus === 401 || upstreamStatus === 403 ? "请检查登录状态" : retryAfterMs ? `约 ${Math.ceil(retryAfterMs / 60_000)} 分钟后可重试` : "请稍后重试"}。`
+    : `部分上游数据同步失败（${FIELD_LABELS[field] || field}${upstreamStatus ? `，HTTP ${upstreamStatus}` : error?.name === "TimeoutError" || error?.name === "AbortError" ? "，超时" : ""}），账号及本地用量仍保留。`;
+  if (!deviceSession) console.warn(`dashboard sync failed: ${field} status=${upstreamStatus || "none"} ${error?.name || ""} ${String(error?.message || "").slice(0, 200)}`);
+  return { field, upstreamStatus, retryAfterMs, message };
+}
+
 function usageSummary(usage, status) {
   return {
     source: "local",
@@ -810,6 +986,7 @@ function usageSummary(usage, status) {
     failures: usage.failures,
     lastAt: usage.lastAt,
     lastStatus: usage.lastStatus,
+    lastCongested: Boolean(usage.lastCongested),
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     cacheReadTokens: usage.cacheReadTokens,
@@ -824,12 +1001,6 @@ function jwtPlan(token) {
 
 function normalizePlanId(value) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-function planRank(value) {
-  const plan = normalizePlanId(value);
-  if (!plan) return 0;
-  return PLAN_RANKS[plan] ?? 1;
 }
 
 function planLabel(value) {

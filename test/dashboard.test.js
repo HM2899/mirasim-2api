@@ -3,9 +3,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { MirasimDashboard, RelayUsageLedger } from "../src/dashboard.js";
 import { MirasimProfilePool } from "../src/pool.js";
 import { StateDatabase } from "../src/database.js";
+import { MirasimRelaySessionError } from "../src/relay-device.js";
 
 function jwt(exp, claims = {}) {
   return `${Buffer.from('{"alg":"none"}').toString("base64url")}.${Buffer.from(JSON.stringify({ exp, sub: "user-a", ...claims })).toString("base64url")}.signature`;
@@ -22,7 +24,140 @@ function setup() {
   return { root, home, config, pool: new MirasimProfilePool([home]), usage: new RelayUsageLedger() };
 }
 
-test("dashboard reads current referral activity and relay usage without returning a token", async () => {
+for (const failure of [401, 503, "malformed"]) {
+  test(`personal quota ${failure} automatically refreshes once then uses the renewed credentials`, async () => {
+    const fixture = setup();
+    let renewals = 0;
+    const tokens = [];
+    try {
+      const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+        sessionRefresher: {
+          refreshInBackground() {},
+          async refreshNow() {
+            renewals++;
+            writeFileSync(join(fixture.home, "setting.json"), JSON.stringify({ auth: { userId: "user-a", token: "renewed-token", refreshToken: "refresh-a", exp: 4102444800 } }));
+            return true;
+          }
+        },
+        fetchImpl: async (url, options) => {
+          if (url.pathname === "/auth/me") return Response.json({ plan: "max" });
+          if (url.pathname === "/v1/limits") {
+            tokens.push(options.headers.Authorization);
+            return tokens.length === 1 ? Response.json({}, { status: failure === "malformed" ? 200 : failure }) : Response.json({ windows: [{ name: "5h", used: 25, budget: 100 }] });
+          }
+          return Response.json({});
+        }
+      });
+      const account = (await dashboard.snapshot()).accounts[0];
+      assert.equal(account.quota.remainingPercent, 75);
+      assert.equal(renewals, 1);
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[1], "Bearer renewed-token");
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  });
+}
+
+test("persistent quota failures are rate-limited without turning unknown quota into zero", async () => {
+  const fixture = setup();
+  let renewals = 0;
+  let reads = 0;
+  try {
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+      sessionRefresher: { refreshInBackground() {}, async refreshNow() { renewals++; return true; } },
+      fetchImpl: async (url) => {
+        if (url.pathname === "/auth/me") return Response.json({ plan: "max" });
+        if (url.pathname === "/v1/limits") { reads++; return Response.json({}, { status: 503 }); }
+        return Response.json({});
+      }
+    });
+    await dashboard.snapshot();
+    const account = (await dashboard.snapshot()).accounts[0];
+    assert.equal(renewals, 1);
+    assert.equal(reads, 3);
+    assert.equal(account.quota.remainingPercent, null);
+    assert.ok(account.syncWarnings.some((warning) => warning.field === "limits"));
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+for (const status of [403, 404, 405, 429]) {
+  test(`quota HTTP ${status} does not force credential refresh`, async () => {
+    const fixture = setup();
+    try {
+      const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+        sessionRefresher: { refreshInBackground() {}, async refreshNow() { assert.fail("unexpected refresh"); } },
+        fetchImpl: async (url) => Response.json(url.pathname === "/auth/me" ? { plan: "max" } : {}, { status: url.pathname === "/v1/limits" ? status : 200 })
+      });
+      await dashboard.snapshot();
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  });
+}
+
+test("bulk account operations validate identities before mutation and delete captured homes", async () => {
+  const fixture = setup();
+  const homes = [fixture.home, join(fixture.root, "b"), join(fixture.root, "c")];
+  const database = new StateDatabase(join(fixture.root, "bulk.sqlite"), { seedHomes: homes });
+  const pool = new MirasimProfilePool(homes);
+  const dashboard = new MirasimDashboard({ ...fixture.config, homes }, pool, fixture.usage, { database, fetchImpl: async () => Response.json({}) });
+  const targets = homes.map((home, index) => ({ key: `account-${index + 1}`, selectionId: createHash("sha256").update(home).digest("hex") }));
+  try {
+    assert.equal((await dashboard.snapshot()).accounts[0].selectionId, targets[0].selectionId);
+    assert.throws(() => dashboard.bulkAccounts("disable", [targets[0], { ...targets[1], selectionId: "stale" }]), /列表已变化/);
+    assert.deepEqual(database.disabledHomes(), []);
+    assert.throws(() => dashboard.bulkAccounts("delete", [targets[0], targets[0]]), /重复/);
+    assert.throws(() => dashboard.bulkAccounts("unknown", targets), /有效/);
+    assert.throws(() => dashboard.bulkAccounts("disable", []), /1–1000/);
+    assert.throws(() => dashboard.bulkAccounts("disable", [null]), /参数无效/);
+    assert.equal(dashboard.bulkAccounts("disable", targets).succeeded, 3);
+    assert.equal(database.disabledHomes().length, 3);
+    assert.equal(dashboard.bulkAccounts("recover", targets).succeeded, 3);
+    assert.equal(database.disabledHomes().length, 0);
+    const deleted = dashboard.bulkAccounts("delete", [targets[0], targets[2]]);
+    assert.equal(deleted.succeeded, 2);
+    assert.deepEqual(pool.homes(), [homes[1]]);
+    assert.deepEqual(database.homes(), [homes[1]]);
+    assert.ok(readFileSync(join(fixture.home, "setting.json"), "utf8"));
+    assert.throws(() => dashboard.bulkAccounts("disable", [targets[0]]), /列表已变化/);
+    assert.deepEqual(database.disabledHomes(), []);
+  } finally {
+    database.db.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("bulk operations report per-account failures without claiming full success", () => {
+  const fixture = setup();
+  try {
+    const selectionId = createHash("sha256").update(fixture.home).digest("hex");
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage);
+    fixture.pool.disable = () => { throw new Error("temporary failure"); };
+    const result = dashboard.bulkAccounts("disable", [{ key: "account-1", selectionId }]);
+    assert.equal(result.succeeded, 0);
+    assert.equal(result.failed, 1);
+    assert.equal(result.results[0].error, "temporary failure");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("dashboard snapshots schedule renewal without awaiting it", async () => {
+  const fixture = setup();
+  let scheduled;
+  try {
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+      fetchImpl: async () => Response.json({}),
+      sessionRefresher: {
+        refreshInBackground(homes) { scheduled = homes; },
+        refreshAll() { assert.fail("snapshot must not await all renewals"); }
+      }
+    });
+    await dashboard.snapshot();
+    assert.deepEqual(scheduled, [fixture.home]);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("dashboard reads the new campaign and relay usage without returning a token", async () => {
   const fixture = setup();
   try {
     fixture.usage.record({ home: fixture.home }, { status: 200, headers: new Headers({ "x-litellm-call-id": "call-1" }) });
@@ -32,10 +167,7 @@ test("dashboard reads current referral activity and relay usage without returnin
           assert.equal(url.origin, "https://login.example.test");
           return json({ name: "Relay User", email: "user@example.test", plan: "Team", tenant: "workspace-a" });
         }
-        if (url.pathname === "/auth/referral") return json({
-          code: "INVITE-123", redeemed: 2, threshold: 5, remaining: 3, reached: false,
-          max_redemptions: 10, current_plan: "basic", next_plan: "plus"
-        });
+        if (url.pathname === "/v1/pay/campaign/my-link") return json({ slug: "go-example", sold: 2, cap: 3, rewarded: false });
         if (url.pathname === "/usage/calls") {
           assert.equal(url.origin, "https://relay.example.test");
           assert.equal(options.headers.Authorization.startsWith("Bearer "), true);
@@ -50,14 +182,66 @@ test("dashboard reads current referral activity and relay usage without returnin
     assert.equal(account.identity.name, "Relay User");
     assert.equal(account.identity.accountType, "Team");
     assert.equal(account.identity.tenant, "workspace-a");
-    assert.deepEqual(account.referral, {
-      code: "INVITE-123", redeemed: 2, threshold: 5, remaining: 3, reached: false,
-      maxRedemptions: 10, currentPlan: "basic", nextPlan: "plus", rewardPlan: "plus", needed: 3
-    });
+    assert.deepEqual(account.campaign, { slug: "go-example", url: "https://mirasim.ai/r/go-example", sold: 2, cap: 3, rewarded: false });
+    assert.equal(account.referral, null);
     assert.equal(account.quota.inputTokens, 120);
     assert.equal(account.quota.outputTokens, 45);
     assert.equal(JSON.stringify(snapshot).includes("signature"), false);
     assert.equal(JSON.stringify(snapshot).includes("refresh-a"), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("device session failure preserves accounts, local usage and successful account data", async () => {
+  const fixture = setup();
+  try {
+    const secondHome = join(fixture.root, "account-b");
+    mkdirSync(secondHome);
+    writeFileSync(join(secondHome, "setting.json"), JSON.stringify({ auth: { userId: "user-b", token: jwt(4_102_444_800, { sub: "user-b" }), exp: 4_102_444_800 } }));
+    fixture.config.homes.push(secondHome);
+    fixture.pool = new MirasimProfilePool(fixture.config.homes);
+    fixture.pool.observeLimits(fixture.home, [{ name: "5h", usedPercent: 85, resetAt: Date.now() + 3_600_000 }]);
+    fixture.usage.record({ home: fixture.home }, { status: 200, headers: new Headers({ "x-litellm-call-id": "call-1" }) });
+    fixture.usage.recordCallUsage(fixture.home, [{ id: "call-1", input: 120, output: 45 }]);
+    let relayRequests = 0;
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+      relaySessions: { headersFor: async (profile) => {
+        if (profile.home === fixture.home) throw new MirasimRelaySessionError("private-upstream-details", { upstreamStatus: 503, retryAfterMs: 900_000 });
+        return { Authorization: "Bearer signed-ticket" };
+      } },
+      fetchImpl: async (url, options) => {
+        if (url.pathname === "/auth/me") return json({ email: "saved@example.test", plan: "max" });
+        if (url.pathname === "/v1/pay/campaign/my-link") return json({ slug: "go-example", sold: 1, cap: 3, rewarded: false });
+        if (url.pathname === "/v1/limits") {
+          relayRequests += 1;
+          assert.equal(options.headers.Authorization, "Bearer signed-ticket");
+          return json({ windows: [{ name: "5h", used: 25, budget: 100 }] });
+        }
+        throw new Error(`Unexpected path ${url.pathname}`);
+      }
+    });
+    const snapshot = await dashboard.snapshot();
+    assert.equal(snapshot.accounts.length, 2);
+    const account = snapshot.accounts[0];
+    assert.equal(account.loggedIn, true);
+    assert.equal(account.identity.email, "saved@example.test");
+    assert.equal(account.campaign.slug, "go-example");
+    assert.equal(account.quota.requests, 1);
+    assert.equal(account.quota.inputTokens, 120);
+    assert.equal(account.quota.source, "local");
+    assert.equal(account.quota.remainingPercent, null);
+    assert.deepEqual(account.quota.windows, []);
+    assert.deepEqual(account.syncWarnings.map((warning) => warning.field), ["usage", "limits"]);
+    assert.equal(account.syncWarnings[0].upstreamStatus, 503);
+    assert.equal(account.syncWarnings[0].retryAfterMs, 900_000);
+    assert.match(account.syncWarnings[0].message, /15 分钟/);
+    assert.doesNotMatch(JSON.stringify(snapshot), /private-upstream-details|signed-ticket|signature|refresh-a/);
+    assert.equal(fixture.pool.usedPercent(fixture.home), 85);
+    assert.equal(snapshot.accounts[1].quota.remainingPercent, 75);
+    assert.deepEqual(snapshot.accounts[1].syncWarnings, []);
+    assert.equal(relayRequests, 1);
+    assert.ok(readFileSync(join(fixture.home, "setting.json"), "utf8").includes("refresh-a"));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -140,6 +324,141 @@ test("manually disabling an account persists it out of the rotation until recove
   }
 });
 
+test("quota windows are converted from the relay's used/budget pair into percentages", async () => {
+  const fixture = setup();
+  try {
+    let limitsHeaders = null;
+    const futureResetAt = Math.floor((Date.now() + 7 * 24 * 60 * 60_000) / 1000);
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+      fetchImpl: async (url, options = {}) => {
+        if (url.pathname === "/auth/me") return json({ email: "user@example.test", plan: "max" });
+        if (url.pathname === "/auth/referral") return json({ code: null, threshold: 0 });
+        if (url.pathname === "/usage/calls") return json({ calls: [] });
+        if (url.pathname === "/v1/limits") {
+          limitsHeaders = options.headers;
+          return json({
+            subject: "user-a",
+            windows: [
+              { name: "5h", used: 5.85365, budget: 156_800, reset_at: futureResetAt },
+              { name: "7d", used: 448_000, budget: 560_000, reset_at: futureResetAt },
+              // Model-scoped and completely spent: it must not decide the account's headline.
+              { name: "7d_fable", used: 296_800, budget: 296_800, reset_at: futureResetAt, model_scoped: true },
+              // No usable figure — a zero budget would otherwise render as "100% left".
+              { name: "broken", used: 10, budget: 0, reset_at: 0 },
+              { name: "missing", used: null, budget: 100 },
+              { name: "empty", used: "", budget: 100 },
+              { name: "negative", used: -1, budget: 100 }
+            ]
+          });
+        }
+        throw new Error(`Unexpected path ${url.pathname}`);
+      }
+    });
+
+    const account = (await dashboard.snapshot()).accounts[0];
+    // The read identifies itself as a metering query rather than traffic.
+    assert.equal(limitsHeaders["x-mirasim-probe"], "usage");
+    // ...and the headers the caller passes no longer replace the authenticated ones.
+    assert.equal(limitsHeaders["x-mirasim-token"], fixture.pool.profile(fixture.home).token);
+
+    assert.deepEqual(account.quota.windows.map((window) => window.name), ["5h", "7d", "7d_fable"]);
+    const [fiveHour, sevenDay, fable] = account.quota.windows;
+    // 5.85365 / 156800 rounds to 0% used, so effectively the whole window is still open.
+    assert.deepEqual(
+      { usedPercent: fiveHour.usedPercent, remainingPercent: fiveHour.remainingPercent, status: fiveHour.status },
+      { usedPercent: 0, remainingPercent: 100, status: "allowed" }
+    );
+    assert.deepEqual(
+      { usedPercent: sevenDay.usedPercent, remainingPercent: sevenDay.remainingPercent, status: sevenDay.status, remaining: sevenDay.remaining },
+      { usedPercent: 80, remainingPercent: 20, status: "warning", remaining: 112_000 }
+    );
+    assert.deepEqual(
+      { usedPercent: fable.usedPercent, status: fable.status, modelScoped: fable.modelScoped },
+      { usedPercent: 100, status: "limit_reached", modelScoped: true }
+    );
+    assert.equal(sevenDay.resetAt, new Date(futureResetAt * 1000).toISOString());
+    // reset_at 0 and a zero budget both mean "no number", not zero.
+    assert.equal(account.quota.windows.some((window) => window.name === "broken"), false);
+
+    // The account is at warning, not limit_reached: the exhausted window is fable's alone, and
+    // the binding figure is the worst of the windows that actually govern the account.
+    assert.equal(account.quota.limitStatus, "warning");
+    assert.equal(account.quota.remainingPercent, 20);
+
+    // The same reading reaches the rotation, which otherwise learns an account's quota only from
+    // traffic it has already sent that account. fable's exhausted window is left out of it for
+    // the same reason it is left out of the headline: it stops fable, not the account.
+    assert.equal(fixture.pool.usedPercent(fixture.home), 80);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a quota reading that is 99% spent is reported as exhausted, and a scoped-only account still gets a figure", async () => {
+  const fixture = setup();
+  try {
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+      fetchImpl: async (url) => {
+        if (url.pathname === "/auth/me") return json({ email: "user@example.test", plan: "max" });
+        if (url.pathname === "/auth/referral") return json({ code: null, threshold: 0 });
+        if (url.pathname === "/usage/calls") return json({ calls: [] });
+        // The upstream's counters lag its refusals, so 99% up is treated as spent.
+        if (url.pathname === "/v1/limits") return json({
+          windows: [{ name: "7d_fable", used: 99_100, budget: 100_000, reset_at: 0, model_scoped: true }]
+        });
+        throw new Error(`Unexpected path ${url.pathname}`);
+      }
+    });
+
+    const account = (await dashboard.snapshot()).accounts[0];
+    assert.equal(account.quota.windows[0].usedPercent, 100);
+    assert.equal(account.quota.windows[0].remainingPercent, 0);
+    assert.equal(account.quota.windows[0].resetAt, null);
+    // Nothing but scoped windows, so they are all there is to go on rather than being ignored.
+    assert.equal(account.quota.limitStatus, "limit_reached");
+    assert.equal(account.quota.remainingPercent, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a relay without a limits endpoint reports no quota figures rather than an error", async () => {
+  const fixture = setup();
+  try {
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+      fetchImpl: async (url) => {
+        if (url.pathname === "/auth/me") return json({ email: "user@example.test", plan: "max" });
+        if (url.pathname === "/auth/referral") return json({ code: null, threshold: 0 });
+        if (url.pathname === "/usage/calls") return json({ calls: [] });
+        if (url.pathname === "/v1/limits") return new Response("not found", { status: 404 });
+        throw new Error(`Unexpected path ${url.pathname}`);
+      }
+    });
+
+    const account = (await dashboard.snapshot()).accounts[0];
+    assert.deepEqual(account.quota.windows, []);
+    assert.equal(account.quota.limitStatus, null);
+    assert.equal(account.quota.remainingPercent, null);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("bulk recovery reports how many accounts it lifted out of cooldown", () => {
+  const fixture = setup();
+  try {
+    const database = new StateDatabase(join(fixture.root, "state.sqlite"), { seedHomes: [fixture.home] });
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, { fetchImpl: async () => json({}), database });
+    assert.deepEqual(dashboard.recoverAllAccounts(), { recovered: 0 });
+    fixture.pool.failure({ home: fixture.home });
+    assert.equal(fixture.pool.status()[0].healthy, false);
+    assert.deepEqual(dashboard.recoverAllAccounts(), { recovered: 1 });
+    assert.equal(fixture.pool.status()[0].healthy, true);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("usage totals persist across ledger instances and do not double count relay call IDs", () => {
   const root = mkdtempSync(join(tmpdir(), "mirasim-usage-ledger-"));
   try {
@@ -159,7 +478,7 @@ test("usage totals persist across ledger instances and do not double count relay
   }
 });
 
-test("referral counters default to zero and no reward is derived without a threshold", async () => {
+test("an unavailable campaign does not fall back to legacy referral rewards", async () => {
   const fixture = setup();
   try {
     const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
@@ -170,32 +489,28 @@ test("referral counters default to zero and no reward is derived without a thres
       }
     });
 
-    assert.deepEqual((await dashboard.snapshot()).accounts[0].referral, {
-      code: null, redeemed: 0, threshold: 0, remaining: 0, reached: false,
-      maxRedemptions: 0, currentPlan: "none", nextPlan: null, rewardPlan: null, needed: 0
-    });
+    const account = (await dashboard.snapshot()).accounts[0];
+    assert.equal(account.campaign, null);
+    assert.equal(account.referral, null);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("a reached invite threshold rewards the current tier when Mirasim reports no next tier", async () => {
+test("campaign rewards follow the explicit official rewarded flag", async () => {
   const fixture = setup();
   try {
     const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
       fetchImpl: async (url) => {
         if (url.pathname === "/auth/me") return json({ email: "user@example.test" });
-        if (url.pathname === "/auth/referral") return json({
-          code: "REF-42", redeemed: 6, threshold: 5, remaining: 4, reached: true,
-          max_redemptions: 10, current_plan: "max", next_plan: null
-        });
+        if (url.pathname === "/v1/pay/campaign/my-link") return json({ slug: "go-reward", sold: 3, cap: 3, rewarded: true });
         throw new Error(`Unexpected path ${url.pathname}`);
       }
     });
 
-    const referral = (await dashboard.snapshot()).accounts[0].referral;
-    assert.equal(referral.rewardPlan, "max");
-    assert.equal(referral.needed, 0);
+    const campaign = (await dashboard.snapshot()).accounts[0].campaign;
+    assert.equal(campaign.rewarded, true);
+    assert.equal(campaign.sold, 3);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -273,7 +588,7 @@ test("dashboard reads Plus and Max account types from official subscription fiel
     });
     const account = (await dashboard.snapshot()).accounts[0];
     assert.equal(account.identity.accountType, "max");
-    assert.equal(account.referral.currentPlan, "plus");
+    assert.equal(account.referral, null);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -346,6 +661,25 @@ test("manual account renewal delegates to the session refresher for the selected
     });
     assert.deepEqual(await dashboard.renewAccount("account-1"), { renewed: true });
     assert.deepEqual(renewedHomes, [fixture.home]);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("account snapshots never run the removed paid Haiku probe", async () => {
+  const fixture = setup();
+  try {
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
+      fetchImpl: async (url, options) => {
+        assert.notEqual(url.pathname, "/v1/messages");
+        assert.notEqual(options.method, "POST");
+        return json({});
+      }
+    });
+
+    assert.equal(dashboard.checkAccountStatus, undefined);
+    await dashboard.snapshot();
+    assert.equal(fixture.usage.snapshot(fixture.home).requests, 0);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -640,7 +974,7 @@ test("MoeMail configuration can be saved from the console without exposing its A
   }
 });
 
-test("blank MoeMail invite code uses an available Max account referral", async () => {
+test("blank MoeMail invite code does not create or redeem legacy invitations", async () => {
   const root = mkdtempSync(join(tmpdir(), "mirasim-dashboard-moemail-max-"));
   const maxHome = join(root, "max-account");
   mkdirSync(maxHome, { recursive: true });
@@ -667,121 +1001,16 @@ test("blank MoeMail invite code uses an available Max account referral", async (
         throw new Error(`Unexpected path ${url.pathname}`);
       }
     });
-    assert.equal((await dashboard.registerMoeMailBatch("", 1)).accounts[0].redeemed, true);
+    assert.equal((await dashboard.registerMoeMailBatch("", 1)).accounts[0].redeemed, false);
+    assert.equal(referralRequests, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("registration picks the highest tier account whose invite code still has redemptions left", async () => {
-  const root = mkdtempSync(join(tmpdir(), "mirasim-dashboard-invite-pick-"));
-  const subjects = ["max-user", "plus-user", "basic-user"];
-  const homes = subjects.map((subject) => {
-    const home = join(root, subject);
-    mkdirSync(home, { recursive: true });
-    writeFileSync(join(home, "setting.json"), JSON.stringify({
-      auth: { userId: subject, token: jwt(4_102_444_800, { sub: subject }), refreshToken: `refresh-${subject}`, exp: 4_102_444_800 }
-    }));
-    return home;
-  });
-  const database = new StateDatabase(join(root, "state.sqlite"), { seedHomes: homes });
-  const config = { homes, accountRoot: join(root, "profiles"), relayUrl: "https://relay.example.test", loginUrl: "https://login.example.test" };
-  const referrals = {
-    // The strongest account has already spent every redemption of its own code.
-    "max-user": { code: "MAX-INVITE", current_plan: "max", max_redemptions: 10, remaining: 0 },
-    "plus-user": { code: "PLUS-INVITE", current_plan: "plus", max_redemptions: 10, remaining: 4 },
-    "basic-user": { code: "BASIC-INVITE", current_plan: "basic", max_redemptions: 10, remaining: 9 }
-  };
-  try {
-    const dashboard = new MirasimDashboard(config, new MirasimProfilePool(homes), new RelayUsageLedger(), {
-      database,
-      moemail: { isConfigured: () => true, createMailbox: async () => ({ id: "mail-1", email: "new@example.test" }), waitForVerificationCode: async () => "123456", deleteMailbox: async () => {} },
-      fetchImpl: async (url, options = {}) => {
-        if (url.pathname === "/auth/referral") return json(referrals[subjectOf(options)] || { code: "NEW-ACCOUNT-INVITE" });
-        if (url.pathname === "/auth/code") return json({});
-        if (url.pathname === "/auth/verify") return json({ access_token: jwt(4_102_444_900), refresh_token: "refresh-new" });
-        if (url.pathname === "/auth/invite/redeem") {
-          assert.deepEqual(JSON.parse(options.body), { code: "PLUS-INVITE" });
-          return json({ access_token: jwt(4_102_445_000), refresh_token: "refresh-redeemed" });
-        }
-        throw new Error(`Unexpected path ${url.pathname}`);
-      }
-    });
-    assert.equal((await dashboard.registerWithMoeMail("")).redeemed, true);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
-test("creating an invite code repeats the desktop client's bare authenticated POST", async () => {
-  const fixture = setup();
-  try {
-    const requests = [];
-    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
-      fetchImpl: async (url, options = {}) => {
-        requests.push({ path: url.pathname, method: options.method, body: options.body, headers: options.headers });
-        return json({
-          code: "FRESH-INVITE", redeemed: 0, threshold: 10, remaining: 50, reached: false,
-          max_redemptions: 50, current_plan: "plus", next_plan: "max"
-        });
-      }
-    });
 
-    assert.deepEqual(await dashboard.createReferral("account-1"), {
-      code: "FRESH-INVITE", redeemed: 0, threshold: 10, remaining: 50, reached: false,
-      maxRedemptions: 50, currentPlan: "plus", nextPlan: "max", rewardPlan: "max", needed: 10
-    });
-    assert.equal(requests.length, 1);
-    const [created] = requests;
-    assert.equal(created.path, "/auth/referral");
-    assert.equal(created.method, "POST");
-    assert.equal(created.body, undefined);
-    assert.equal(created.headers["Content-Type"], undefined);
-    assert.equal(created.headers.Authorization.startsWith("Bearer "), true);
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test("a paused invite code creation is reported in Chinese", async () => {
-  const fixture = setup();
-  try {
-    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
-      fetchImpl: async (url, options = {}) => options.method === "POST"
-        ? json({ detail: "invite code creation is paused" }, 503)
-        : json({ code: null, threshold: 10, remaining: 50, max_redemptions: 50, current_plan: "plus", next_plan: "max" })
-    });
-
-    await assert.rejects(
-      dashboard.createReferral("account-1"),
-      (error) => error.statusCode === 503 && error.message === "官方已暂停生成新的邀请码，请稍后再试。"
-    );
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test("a refused creation still answers with the code Mirasim already issued", async () => {
-  const fixture = setup();
-  try {
-    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, {
-      fetchImpl: async (url, options = {}) => options.method === "POST"
-        ? json({ detail: "invite code creation is paused" }, 503)
-        : json({
-          code: "EXISTING-INVITE", redeemed: 1, threshold: 10, remaining: 49, reached: false,
-          max_redemptions: 50, current_plan: "plus", next_plan: "max"
-        })
-    });
-
-    const referral = await dashboard.createReferral("account-1");
-    assert.equal(referral.code, "EXISTING-INVITE");
-    assert.equal(referral.rewardPlan, "max");
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test("registration stops asking other accounts once Mirasim pauses invite creation", async () => {
+test("registration does not attempt the retired invite creation endpoint", async () => {
   const root = mkdtempSync(join(tmpdir(), "mirasim-dashboard-invite-paused-"));
   const subjects = ["plus-a", "plus-b", "plus-c"];
   const homes = subjects.map((subject) => {
@@ -813,7 +1042,7 @@ test("registration stops asking other accounts once Mirasim pauses invite creati
 
     const result = await dashboard.registerWithMoeMail("");
     assert.equal(result.redeemed, false);
-    assert.equal(creates, 1);
+    assert.equal(creates, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -881,3 +1110,25 @@ function subjectOf(options) {
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
+
+test("the rotation mode is stored, replayed onto the pool, and refuses a name it does not know", async () => {
+  const fixture = setup();
+  try {
+    const database = new StateDatabase(join(fixture.root, "state.sqlite"), { seedHomes: [fixture.home] });
+    const dashboard = new MirasimDashboard(fixture.config, fixture.pool, fixture.usage, { fetchImpl: async () => json({}), database });
+
+    assert.deepEqual(dashboard.rotationMode(), { mode: "spread", modes: ["spread", "waterfall", "roundRobin"] });
+    assert.deepEqual(dashboard.setRotationMode("waterfall"), { mode: "waterfall", modes: ["spread", "waterfall", "roundRobin"] });
+    assert.equal(fixture.pool.mode(), "waterfall");
+    // Stored, so a restart keeps the operator's choice rather than reverting to the default.
+    assert.equal(database.getRotationMode(), "waterfall");
+
+    // A name the pool cannot place is refused, and leaves the running mode untouched.
+    assert.throws(() => dashboard.setRotationMode("greedy"), /轮询模式必须是/);
+    assert.throws(() => dashboard.setRotationMode(""), /轮询模式必须是/);
+    assert.equal(fixture.pool.mode(), "waterfall");
+    assert.equal(database.getRotationMode(), "waterfall");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
