@@ -113,4 +113,4 @@ vendor/     Mirasim 官方客户端的运行时包（见下）
 
 ## 许可证
 
-见仓库根目录的 `LICENSE` 文件。
+[MIT](LICENSE)。`vendor/` 目录下的 Mirasim 官方运行时除外，其版权与许可归 Mirasim 所有。
